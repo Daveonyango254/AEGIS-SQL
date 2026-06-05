@@ -1,0 +1,150 @@
+# AEGIS-SQL Configuration
+# Three-Axis Constrained Optimization for Hybrid NL2SQL
+
+# ============================================================================
+# Language Configuration
+# ============================================================================
+language: english  # Supported: english, spanish, korean, chinese, swahili
+
+# ============================================================================
+# Embedding Model Configuration (Query Planner Agent)
+# ============================================================================
+embedding:
+  model: BAAI/bge-m3  # Multilingual embedding model
+  device: cuda  # cuda or cpu
+  cache_dir: ~/.cache/huggingface  # HuggingFace cache directory
+  adapter_path: null  # Optional: Path to LoRA adapter for fine-tuning
+  batch_size: 32  # Batch size for embedding computation
+  max_length: 512  # Maximum sequence length
+
+# ============================================================================
+# Local SLM Configuration (FSLM)
+# ============================================================================
+slm:
+  model: cycloneboy/SLM-SQL-1.5B  # Local SLM for SQL generation
+  device: auto  # auto/cuda/cpu (auto for automatic device mapping)
+  cache_dir: ~/.cache/huggingface  # HuggingFace cache directory
+  hf_token: ${HF_HUB_TOKEN}  # HuggingFace token from .env
+  adapter_path: null  # Optional: Path to LoRA adapter
+  max_tokens: 512
+  temperature: 0.0  # Greedy decoding for deterministic SQL
+  torch_dtype: float16  # float16/bfloat16/float32
+  trust_remote_code: true  # Trust remote code from HuggingFace
+
+# ============================================================================
+# Remote LLM Configuration (FLLM)
+# ============================================================================
+llm:
+  provider: openai  # openai or anthropic
+  model: gpt-4o  # gpt-4o, gpt-4-turbo, claude-3-5-sonnet-20241022, etc.
+  api_key: ${OPENAI_API_KEY}  # Load from .env
+  temperature: 0.0
+  max_tokens: 512
+  timeout: 30  # Request timeout in seconds
+  max_retries: 3  # Maximum number of retries on failure
+  retry_delay: 1.0  # Initial delay between retries (exponential backoff)
+
+# ============================================================================
+# Privacy Configuration (DP Abstraction)
+# ============================================================================
+privacy:
+  epsilon: 1.0  # ε privacy budget (0 = disable abstraction)
+  abstraction_enabled: true  # Enable DP abstraction for remote queries
+  reconstruction_enabled: true  # Enable reconstruction (must match abstraction_enabled)
+  placeholder_vocab_size: 100  # Number of semantic placeholders in V_abs
+
+  sensitivity_policy:
+    pii: true  # Protect PII (names, emails, SSN, etc.)
+    proprietary: true  # Protect proprietary schema/data
+    regulated: true  # Protect regulated data (medical, financial)
+
+# ============================================================================
+# Cost Configuration
+# ============================================================================
+cost:
+  budget_per_query: 0.01  # USD budget per query
+  remote_token_cost: 0.000015  # Cost per token for remote LLM (GPT-4o pricing)
+  local_compute_cost: 0.0001  # Fixed cost per local SLM inference
+
+# ============================================================================
+# Router Configuration (Content-Independent Routing)
+# ============================================================================
+router:
+  threshold_complexity: 0.7  # Complexity threshold (0-1): >= threshold → REMOTE
+  force_local: false  # Force all queries to local FSLM (overrides threshold)
+  force_remote: false  # Force all queries to remote FLLM (overrides threshold)
+  features:
+    - query_token_count
+    - schema_element_count
+    - query_structural_complexity
+
+# ============================================================================
+# Verifier Configuration (Neuro-Symbolic Verification)
+# ============================================================================
+verifier:
+  grammar_check: true  # Enable grammar verification (sqlglot parser)
+  schema_check: true  # Enable schema verification
+  execution_check_slm: true  # Enable execution verification for SLM outputs
+  execution_check_llm: true  # Enable execution verification for LLM outputs
+  sample_size: 100  # Number of rows for execution verification
+  timeout_seconds: 5  # Execution timeout per query
+
+# ============================================================================
+# Evaluation Configuration
+# ============================================================================
+evaluation:
+  bird_dev_path: ./data/bird_dev  # Path to BIRD-dev benchmark
+  output_dir: ./results  # Evaluation results directory
+  seed: 42  # Fixed seed for reproducibility
+  metrics:
+    - execution_accuracy  # EX metric
+    - ves  # Valid Efficiency Score
+    - privacy_loss  # ℒ_priv = ε × E[|prompt|] × Pr(r=remote)
+    - cost_per_query  # USD per query
+    - latency  # End-to-end latency
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  format: json  # json or text
+  file: ./logs/aegis_sql.log
+  track_routing: true
+  track_privacy: true
+  track_verification: true
+  track_latency: true
+
+# ============================================================================
+# Configuration Presets (uncomment to use)
+# ============================================================================
+
+# --- LOCAL-ONLY MODE ---
+# Forces all queries to local FSLM (zero privacy leakage, no API costs)
+# router:
+#   force_local: true
+# OR set budget to 0:
+# cost:
+#   budget_per_query: 0.0
+
+# --- REMOTE-ONLY MODE ---
+# Forces all queries to remote FLLM (maximum accuracy, higher cost)
+# router:
+#   force_remote: true
+# OR set threshold to 0:
+# router:
+#   threshold_complexity: 0.0
+
+# --- NO ABSTRACTION MODE ---
+# Disables DP abstraction (WARNING: sensitive data sent to remote LLM!)
+# privacy:
+#   abstraction_enabled: false
+#   reconstruction_enabled: false
+# OR set epsilon to 0:
+# privacy:
+#   epsilon: 0.0
+
+# --- HYBRID MODE (DEFAULT) ---
+# Automatic routing based on complexity and cost
+# Abstraction enabled for remote queries
+# (Current configuration above)
