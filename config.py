@@ -178,6 +178,52 @@ class EvaluationConfig(BaseModel):
     )
 
 
+class AmbiguityConfig(BaseModel):
+    """Query ambiguity resolution configuration.
+
+    Detects and resolves ambiguous queries before SQL generation.
+
+    Attributes:
+        enabled: Enable ambiguity detection and resolution (default: False)
+        detector_type: Detection method - "rules" (fast, local) or "llm" (accurate)
+        resolution_mode: Resolution strategy - "auto" (use defaults) or "interactive" (ask user)
+        auto_resolve_temporal: Automatically resolve temporal ambiguities
+        temporal_default_days: Default days for "recent" queries (default: 30)
+        confidence_threshold: Minimum confidence to flag ambiguity (0-1)
+    """
+
+    enabled: bool = Field(default=False, description="Enable ambiguity detection (disabled by default)")
+    detector_type: str = Field(default="rules", description="Detection method: 'rules' or 'llm'")
+    resolution_mode: str = Field(default="auto", description="Resolution mode: 'auto' or 'interactive'")
+    auto_resolve_temporal: bool = Field(default=True, description="Auto-resolve temporal ambiguities")
+    temporal_default_days: int = Field(default=30, description="Default days for 'recent' queries")
+    confidence_threshold: float = Field(default=0.6, description="Min confidence to flag ambiguity (0-1)")
+
+    @field_validator("detector_type")
+    @classmethod
+    def validate_detector_type(cls, v: str) -> str:
+        """Validate detector type is valid."""
+        if v not in ["rules", "llm"]:
+            raise ValueError("detector_type must be 'rules' or 'llm'")
+        return v
+
+    @field_validator("resolution_mode")
+    @classmethod
+    def validate_resolution_mode(cls, v: str) -> str:
+        """Validate resolution mode is valid."""
+        if v not in ["auto", "interactive"]:
+            raise ValueError("resolution_mode must be 'auto' or 'interactive'")
+        return v
+
+    @field_validator("confidence_threshold")
+    @classmethod
+    def validate_confidence_threshold(cls, v: float) -> float:
+        """Validate confidence threshold is in valid range."""
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("confidence_threshold must be between 0.0 and 1.0")
+        return v
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration.
 
@@ -220,6 +266,7 @@ class AEGISConfig(BaseSettings):
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     cost: CostConfig = Field(default_factory=CostConfig)
     router: RouterConfig = Field(default_factory=RouterConfig)
+    ambiguity: AmbiguityConfig = Field(default_factory=AmbiguityConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

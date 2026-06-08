@@ -20,7 +20,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from config import AEGISConfig, EmbeddingConfig, SLMConfig, RouterConfig, CostConfig
+from config import AEGISConfig, EmbeddingConfig, SLMConfig, LLMConfig, RouterConfig, CostConfig
 from aegis_types import Schema
 from retriever.schema_retriever import SchemaRetriever
 from generator.slm_generator import SLMGenerator
@@ -60,6 +60,7 @@ class ModelCache:
         self._slm_generator: Optional[SLMGenerator] = None
         self._router: Optional[ContentIndependentRouter] = None
         self._schema_retrievers: Dict[str, SchemaRetriever] = {}
+        self._ambiguity_resolver = None  # AmbiguityResolver (lazy-loaded if enabled)
 
         # Config
         self._config: Optional[AEGISConfig] = None
@@ -304,6 +305,30 @@ class ModelCache:
 
         return self._router
 
+    def get_llm_generator(self, llm_config: Optional[LLMConfig] = None):
+        """Get LLM fallback generator with proper config.
+
+        Note: Unlike SLM, LLM generator is stateless and lightweight, so we don't cache it.
+        Each call creates a new instance with the properly loaded config.
+
+        Args:
+            llm_config: Optional LLM config (uses cached config if None)
+
+        Returns:
+            New LLMFallback instance with proper config from cache
+        """
+        # Get config from cache
+        if llm_config is None:
+            if self._config:
+                llm_config = self._config.llm
+            else:
+                llm_config = LLMConfig()
+
+        # Import here to avoid circular dependency
+        from generator.llm_fallback import LLMFallback
+
+        return LLMFallback(llm_config)
+
     def _update_lru(self, db_id: str) -> None:
         """Update LRU access order for retriever.
 
@@ -391,6 +416,7 @@ class ModelCache:
         self._bgem3_model = None
         self._slm_generator = None
         self._router = None
+        self._ambiguity_resolver = None
         self._schema_retrievers.clear()
         self._retriever_access_order.clear()
         logger.info("Cache cleared")

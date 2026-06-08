@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 
 from loguru import logger
 
-from aegis_types import Query, Language, Schema, SchemaElement, SensitivityLevel
+from aegis_types import Query, Language, Schema, SchemaElement, SensitivityLevel, ForeignKey
 
 
 class BIRDLoader:
@@ -105,10 +105,52 @@ class BIRDLoader:
             database_id=query_dict['db_id'],
         )
 
+    def _extract_foreign_keys(self, cursor: sqlite3.Cursor, tables: List[str]) -> tuple[List[ForeignKey], Dict[str, List[str]]]:
+        """Extract foreign keys and primary keys from database.
+
+        Args:
+            cursor: SQLite cursor
+            tables: List of table names
+
+        Returns:
+            Tuple of (foreign_keys, primary_keys)
+        """
+        foreign_keys = []
+        primary_keys = {}
+
+        for table in tables:
+            # Extract foreign keys using PRAGMA
+            cursor.execute(f'PRAGMA foreign_key_list("{table}");')
+            fk_rows = cursor.fetchall()
+
+            for fk_row in fk_rows:
+                # fk_row format: (id, seq, to_table, from_col, to_col, on_update, on_delete, match)
+                to_table = fk_row[2]
+                from_col = fk_row[3]
+                to_col = fk_row[4]
+
+                foreign_keys.append(
+                    ForeignKey(
+                        from_table=table,
+                        from_column=from_col,
+                        to_table=to_table,
+                        to_column=to_col,
+                    )
+                )
+
+            # Extract primary keys
+            cursor.execute(f'PRAGMA table_info("{table}");')
+            col_rows = cursor.fetchall()
+            pk_cols = [row[1] for row in col_rows if row[5] > 0]  # pk flag at index 5
+            if pk_cols:
+                primary_keys[table] = pk_cols
+
+        return foreign_keys, primary_keys
+
     def load_schema_for_db(self, db_id: str) -> Schema:
         """Load schema for a specific database.
 
-        Extracts schema from SQLite database file.
+        Extracts schema from SQLite database file including FK relationships.
 
         Args:
             db_id: Database identifier
@@ -146,15 +188,20 @@ class BIRDLoader:
                         )
                     )
 
+            # Extract foreign keys and primary keys
+            foreign_keys, primary_keys = self._extract_foreign_keys(cursor, tables)
+
             conn.close()
 
-            logger.debug(f"Loaded schema for {db_id}: {len(tables)} tables, {len(schema_elements)} columns")
+            logger.debug(f"Loaded schema for {db_id}: {len(tables)} tables, {len(schema_elements)} columns, {len(foreign_keys)} FKs")
 
             # Create schema object
             schema = Schema(
                 database_id=db_id,
                 tables=tables,
                 columns=schema_elements,
+                foreign_keys=foreign_keys,
+                primary_keys=primary_keys,
                 documentation=None,
                 sensitive_elements=set(),  # BIRD doesn't mark sensitive data
             )

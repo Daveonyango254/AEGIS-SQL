@@ -223,7 +223,7 @@ class LLMFallback:
     def _format_prompt(
         self, abstracted_query: AbstractedPrompt, schema_elements: List[SchemaElement]
     ) -> str:
-        """Format prompt for LLM generation.
+        """Format prompt for LLM generation with CREATE TABLE syntax and FK hints.
 
         Args:
             abstracted_query: Abstracted query
@@ -234,18 +234,44 @@ class LLMFallback:
 
         Formats prompt with abstracted query and schema for the LLM.
         """
-        # Simple prompt template
-        schema_str = "\n".join(
-            [f"- {elem.name} ({elem.data_type})" for elem in schema_elements]
-        )
-        prompt = f"""Given the following database schema:
+        # Group schema elements by table
+        tables = {}
+        for elem in schema_elements:
+            if '.' in elem.name:
+                table, col = elem.name.split('.', 1)
+                if table not in tables:
+                    tables[table] = []
+                tables[table].append(elem)
 
-{schema_str}
+        # Format as CREATE TABLE statements
+        schema_str = ""
+        for table, cols in tables.items():
+            schema_str += f"CREATE TABLE {table} (\n"
+            for col in cols:
+                col_name = col.name.split('.', 1)[1]
+                # Add backticks for special characters
+                if ' ' in col_name or '(' in col_name or '-' in col_name:
+                    col_name = f"`{col_name}`"
+                col_type = col.data_type if col.data_type else "TEXT"
+                schema_str += f"  {col_name} {col_type}"
+                if col.description:
+                    schema_str += f" -- {col.description}"
+                schema_str += ",\n"
+            schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
 
+        # Add FK hints if multiple tables present
+        fk_hints = ""
+        if len(tables) > 1:
+            table_names = list(tables.keys())
+            fk_hints = f"\nNote: Tables {', '.join(table_names)} may be related via foreign keys. Use JOIN when the query requires combining data from multiple tables.\n"
+
+        prompt = f"""Given the following SQLite database schema:
+
+{schema_str}{fk_hints}
 Generate a valid SQLite query to answer this question:
 {abstracted_query.text}
 
-Return only the SQL query without explanation."""
+Return only the SQL query without explanation. Use proper JOINs if multiple tables are needed."""
         return prompt
 
     def _extract_sql_from_output(self, output: str) -> str:

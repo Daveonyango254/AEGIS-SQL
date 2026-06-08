@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -288,17 +289,104 @@ def main():
 
         logger.info(f"✓ Summary saved to: {summary_file}")
 
+        # ===================================================================
+        # Compute EX and VES metrics automatically
+        # ===================================================================
+        logger.info("\n" + "=" * 80)
+        logger.info("Computing EX and VES Metrics")
+        logger.info("=" * 80)
+
+        # Compute EX (Execution Accuracy)
+        logger.info("\n[7/8] Computing EX (Execution Accuracy)...")
+        try:
+            ex_cmd = [
+                sys.executable,
+                "-m", "evaluation.evaluator_ex",
+                "--predicted_sql_path", str(predictions_file),
+                "--ground_truth_path", f"{args.bird_path}/dev.json",
+                "--db_root_path", f"{args.bird_path}/dev_databases",
+                "--diff_json_path", f"{args.bird_path}/dev.json",
+            ]
+            logger.info(f"Running: {' '.join(ex_cmd)}")
+
+            ex_result = subprocess.run(ex_cmd, capture_output=True, text=True, check=False)
+
+            # Save EX output
+            ex_output_file = output_dir / "ex_results.txt"
+            with open(ex_output_file, 'w', encoding='utf-8') as f:
+                f.write("=== EX (Execution Accuracy) Results ===\n\n")
+                f.write(ex_result.stdout)
+                if ex_result.stderr:
+                    f.write("\n\n=== STDERR ===\n")
+                    f.write(ex_result.stderr)
+
+            if ex_result.returncode == 0:
+                logger.info(f"✓ EX computation completed")
+                logger.info(f"✓ EX results saved to: {ex_output_file}")
+                # Print key results
+                for line in ex_result.stdout.split('\n'):
+                    if 'accuracy' in line.lower() or 'execution' in line.lower():
+                        logger.info(f"  {line.strip()}")
+            else:
+                logger.warning(f"⚠ EX computation had warnings (exit code {ex_result.returncode})")
+                logger.warning(f"  Check {ex_output_file} for details")
+
+        except Exception as e:
+            logger.error(f"✗ EX computation failed: {e}")
+            logger.exception("Full traceback:")
+
+        # Compute VES (Valid Efficiency Score)
+        logger.info("\n[8/8] Computing VES (Valid Efficiency Score)...")
+        try:
+            ves_cmd = [
+                sys.executable,
+                "-m", "evaluation.evaluator_ves",
+                "--predicted_sql_path", str(predictions_file),
+                "--ground_truth_path", f"{args.bird_path}/dev.json",
+                "--db_root_path", f"{args.bird_path}/dev_databases",
+                "--diff_json_path", f"{args.bird_path}/dev.json",
+            ]
+            logger.info(f"Running: {' '.join(ves_cmd)}")
+
+            ves_result = subprocess.run(ves_cmd, capture_output=True, text=True, check=False)
+
+            # Save VES output
+            ves_output_file = output_dir / "ves_results.txt"
+            with open(ves_output_file, 'w', encoding='utf-8') as f:
+                f.write("=== VES (Valid Efficiency Score) Results ===\n\n")
+                f.write(ves_result.stdout)
+                if ves_result.stderr:
+                    f.write("\n\n=== STDERR ===\n")
+                    f.write(ves_result.stderr)
+
+            if ves_result.returncode == 0:
+                logger.info(f"✓ VES computation completed")
+                logger.info(f"✓ VES results saved to: {ves_output_file}")
+                # Print key results
+                for line in ves_result.stdout.split('\n'):
+                    if 'ves' in line.lower() or 'efficiency' in line.lower():
+                        logger.info(f"  {line.strip()}")
+            else:
+                logger.warning(f"⚠ VES computation had warnings (exit code {ves_result.returncode})")
+                logger.warning(f"  Check {ves_output_file} for details")
+
+        except Exception as e:
+            logger.error(f"✗ VES computation failed: {e}")
+            logger.exception("Full traceback:")
+
         # Print completion message
         logger.info("\n" + "=" * 80)
-        logger.info("✓ PREDICTION GENERATION COMPLETED")
+        logger.info("✓ EVALUATION COMPLETED")
         logger.info("=" * 80)
         logger.info(f"Generated predictions: {len(predictions)}")
         logger.info(f"Total time: {total_time/60:.1f} minutes")
         logger.info(f"Average per query: {total_time/len(queries):.1f} seconds")
-        logger.info(f"Output directory: {output_dir}")
-        logger.info("\nNext steps:")
-        logger.info(f"  1. Run EX evaluation: python -m evaluation.evaluator_ex --predicted_sql_path {predictions_file} ...")
-        logger.info(f"  2. Or run full pipeline: python run_full_evaluation.py --predictions_file {predictions_file}")
+        logger.info(f"\nOutput files:")
+        logger.info(f"  Predictions: {predictions_file}")
+        logger.info(f"  EX Results: {output_dir / 'ex_results.txt'}")
+        logger.info(f"  VES Results: {output_dir / 'ves_results.txt'}")
+        logger.info(f"  Summary: {summary_file}")
+        logger.info(f"  Output directory: {output_dir}")
 
         return 0
 

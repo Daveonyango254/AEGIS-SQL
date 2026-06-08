@@ -21,7 +21,7 @@ embedding:
 # Local SLM Configuration (FSLM)
 # ============================================================================
 slm:
-  model: cycloneboy/SLM-SQL-1.5B  # Local SLM for SQL generation
+  model: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct #cycloneboy/SLM-SQL-1.5B  # Local SLM for SQL generation
   device: auto  # auto/cuda/cpu (auto for automatic device mapping)
   cache_dir: ~/.cache/huggingface  # HuggingFace cache directory
   hf_token: ${HF_HUB_TOKEN}  # HuggingFace token from .env
@@ -70,13 +70,24 @@ cost:
 # Router Configuration (Content-Independent Routing)
 # ============================================================================
 router:
-  threshold_complexity: 0.7  # Complexity threshold (0-1): >= threshold → REMOTE
+  threshold_complexity: 0.5  # Complexity threshold (0-1): >= threshold → REMOTE (lowered from 0.7 route ~98% to REMOTE)
   force_local: false  # Force all queries to local FSLM (overrides threshold)
   force_remote: false  # Force all queries to remote FLLM (overrides threshold)
   features:
     - query_token_count
     - schema_element_count
     - query_structural_complexity
+
+# ============================================================================
+# Query Ambiguity Resolution (Optional Enhancement - DISABLED BY DEFAULT)
+# ============================================================================
+ambiguity:
+  enabled: false  # Set to true to enable ambiguity detection and resolution
+  detector_type: "rules"  # "rules" (fast, local, zero-cost) or "llm" (higher accuracy)
+  resolution_mode: "auto"  # "auto" (use defaults) or "interactive" (ask user)
+  auto_resolve_temporal: true  # Automatically resolve temporal ambiguities
+  temporal_default_days: 30  # Default interpretation for "recent" queries
+  confidence_threshold: 0.6  # Minimum confidence (0-1) to flag ambiguity
 
 # ============================================================================
 # Verifier Configuration (Neuro-Symbolic Verification)

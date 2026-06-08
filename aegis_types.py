@@ -85,6 +85,22 @@ class SchemaElement:
 
 
 @dataclass
+class ForeignKey:
+    """Foreign key relationship between tables.
+
+    Attributes:
+        from_table: Source table name
+        from_column: Source column name
+        to_table: Target table name
+        to_column: Target column name
+    """
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+
+
+@dataclass
 class Schema:
     """Database schema representation.
 
@@ -92,6 +108,8 @@ class Schema:
         database_id: Unique database identifier
         tables: List of table names
         columns: List of column schema elements
+        foreign_keys: Foreign key relationships (for FK expansion in retrieval)
+        primary_keys: Primary key columns per table
         documentation: Optional schema documentation text
         sensitive_elements: Set of sensitive element names
     """
@@ -99,12 +117,28 @@ class Schema:
     database_id: str
     tables: List[str]
     columns: List[SchemaElement]
+    foreign_keys: List[ForeignKey] = field(default_factory=list)
+    primary_keys: Dict[str, List[str]] = field(default_factory=dict)
     documentation: Optional[str] = None
     sensitive_elements: Set[str] = field(default_factory=set)
 
     def get_sensitive_elements(self) -> List[SchemaElement]:
         """Return all schema elements marked as sensitive."""
         return [col for col in self.columns if col.sensitivity != SensitivityLevel.PUBLIC]
+
+    def get_foreign_keys_for_table(self, table_name: str) -> List[ForeignKey]:
+        """Get all foreign keys involving a table (as source or target).
+
+        Args:
+            table_name: Name of the table
+
+        Returns:
+            List of foreign keys where table is source or target
+        """
+        return [
+            fk for fk in self.foreign_keys
+            if fk.from_table == table_name or fk.to_table == table_name
+        ]
 
 
 @dataclass

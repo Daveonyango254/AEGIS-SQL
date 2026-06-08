@@ -69,6 +69,10 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
     workflow = StateGraph(AEGISState)
 
     # Define nodes
+    # Conditional: Add ambiguity resolution node if enabled
+    if config.ambiguity.enabled:
+        workflow.add_node("ambiguity_resolution", ambiguity_resolution_node)
+
     workflow.add_node("schema_extraction", schema_extraction_node)
     workflow.add_node("routing", routing_node)
     workflow.add_node("abstraction", abstraction_node)
@@ -78,7 +82,14 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
     workflow.add_node("verification", verification_node)
 
     # Define edges
-    workflow.set_entry_point("schema_extraction")
+    if config.ambiguity.enabled:
+        # Ambiguity resolution first, then schema extraction
+        workflow.set_entry_point("ambiguity_resolution")
+        workflow.add_edge("ambiguity_resolution", "schema_extraction")
+    else:
+        # Standard entry point
+        workflow.set_entry_point("schema_extraction")
+
     workflow.add_edge("schema_extraction", "routing")
 
     # Conditional routing after router decision
@@ -121,6 +132,100 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
 # ============================================================================
 
 
+def ambiguity_resolution_node(state: AEGISState) -> AEGISState:
+    """Query Planner Agent - Step 0: Ambiguity Detection & Resolution (optional).
+
+    Detects and resolves ambiguous natural language queries before SQL generation.
+    Only runs if ambiguity.enabled=true in config.
+
+    Args:
+        state: Current workflow state
+
+    Returns:
+        Updated state with potentially rewritten query
+    """
+    logger.info("Running Query Planner Agent - Step 0: Ambiguity Resolution...")
+
+    # Get ambiguity resolver from cache
+    from workflow.model_cache import get_cache
+    cache = get_cache()
+
+    # Lazy-load resolver on first use
+    if not hasattr(cache, '_ambiguity_resolver') or cache._ambiguity_resolver is None:
+        from query_planner.ambiguity_resolver import AmbiguityResolver
+        from config import AEGISConfig
+
+        # Load config to get ambiguity settings
+        config = AEGISConfig.from_yaml("config.yaml")
+        amb_config = config.ambiguity
+
+        cache._ambiguity_resolver = AmbiguityResolver(
+            detector_type=amb_config.detector_type,
+            resolution_mode=amb_config.resolution_mode,
+            auto_resolve_temporal=amb_config.auto_resolve_temporal,
+            temporal_default_days=amb_config.temporal_default_days,
+            confidence_threshold=amb_config.confidence_threshold
+        )
+
+    resolver = cache._ambiguity_resolver
+
+    # Detect ambiguities
+    query = state["query"]
+    schema = state.get("schema")
+
+    ambiguities = resolver.detect(query, schema)
+
+    # Store original query before any modifications
+    state["original_query"] = query
+    state["is_ambiguous"] = len(ambiguities) > 0
+    state["detected_ambiguities"] = [
+        {
+            "type": amb.type,
+            "phrase": amb.phrase,
+            "reason": amb.reason,
+            "candidates": amb.candidates,
+            "confidence": amb.confidence
+        }
+        for amb in ambiguities
+    ]
+
+    if len(ambiguities) == 0:
+        logger.info("AMBIGUITY_CHECK: No ambiguities detected")
+        return state
+
+    logger.info(f"AMBIGUITY_DETECTED: Found {len(ambiguities)} ambiguities")
+    for amb in ambiguities:
+        logger.debug(f"  - {amb.type}: '{amb.phrase}' → {amb.candidates}")
+
+    # Resolve ambiguities
+    try:
+        rewritten_query, resolutions = resolver.resolve(query, ambiguities, schema)
+
+        # Update query with resolved version
+        state["query"].text = rewritten_query
+        state["ambiguity_resolutions"] = [
+            {
+                "type": res.ambiguity.type,
+                "phrase": res.ambiguity.phrase,
+                "chosen": res.chosen_interpretation,
+                "rewritten": res.rewritten_phrase,
+                "method": res.method
+            }
+            for res in resolutions
+        ]
+
+        logger.info(f"AMBIGUITY_RESOLVED: {len(resolutions)} ambiguities resolved")
+        logger.info(f"QUERY_REWRITTEN: {rewritten_query}")
+
+    except Exception as e:
+        # If interactive mode raises RequiresClarificationException
+        # or any other error, store it in state
+        logger.warning(f"Ambiguity resolution failed: {e}")
+        state["clarification_questions"] = getattr(e, 'questions', None)
+
+    return state
+
+
 def schema_extraction_node(state: AEGISState) -> AEGISState:
     """Query Planner Agent - Step 1: Schema Extraction.
 
@@ -149,7 +254,7 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
 
     # Retrieve schema elements
     query = state["query"]
-    schema_elements = retriever.retrieve(query, top_k=10)
+    schema_elements = retriever.retrieve(query, top_k=25)  # Increased from 10 to get more complete schema coverage
 
     state["schema_elements"] = schema_elements
 
@@ -205,13 +310,20 @@ def abstraction_node(state: AEGISState) -> AEGISState:
     """
     logger.info("Applying DP abstraction...")
 
-    # Initialize abstraction components
-    from config import PrivacyConfig, SensitivityPolicyConfig
+    # Get privacy config from cache
+    from workflow.model_cache import get_cache
     from abstraction.placeholder_vocab import PlaceholderVocabulary
     from abstraction.sensitivity_policy import SensitivityPolicy
 
-    privacy_config = PrivacyConfig()
-    policy_config = SensitivityPolicyConfig()
+    cache = get_cache()
+    if cache._config:
+        privacy_config = cache._config.privacy
+        policy_config = cache._config.privacy.sensitivity_policy
+    else:
+        # Fallback to defaults if cache not initialized
+        from config import PrivacyConfig, SensitivityPolicyConfig
+        privacy_config = PrivacyConfig()
+        policy_config = SensitivityPolicyConfig()
 
     # Create components
     vocab = PlaceholderVocabulary(vocab_size=privacy_config.placeholder_vocab_size)
@@ -272,10 +384,10 @@ def fllm_generation_node(state: AEGISState) -> AEGISState:
     """
     logger.info("Generating SQL with FLLM...")
 
-    # Initialize LLM fallback
-    from config import LLMConfig
-    llm_config = LLMConfig()
-    generator = LLMFallback(llm_config)
+    # Get LLM generator from cache (uses properly loaded config)
+    from workflow.model_cache import get_cache
+    cache = get_cache()
+    generator = cache.get_llm_generator()
 
     # Generate SQL from abstracted prompt
     abstracted_prompt = state.get("abstracted_prompt")

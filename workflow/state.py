@@ -64,6 +64,13 @@ class AEGISState(TypedDict, total=False):
     database_id: str
     db_path: Optional[str]  # Path to database file (for evaluation)
 
+    # Ambiguity Resolution (optional, if enabled in config)
+    original_query: Optional[Query]  # Query before ambiguity resolution
+    is_ambiguous: Optional[bool]  # Whether ambiguities were detected
+    detected_ambiguities: Optional[List[Dict]]  # List of detected ambiguities
+    ambiguity_resolutions: Optional[List[Dict]]  # How ambiguities were resolved
+    clarification_questions: Optional[List[Dict]]  # For interactive mode
+
     # Schema Extraction
     schema: Optional[Schema]  # Full database schema
     schema_elements: List[SchemaElement]

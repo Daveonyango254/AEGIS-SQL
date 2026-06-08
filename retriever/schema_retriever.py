@@ -173,19 +173,53 @@ class SchemaRetriever:
             self.sparse_embeddings = None
 
     def retrieve(
-        self, query: Query, top_k: int = 10, use_hybrid: bool = True
+        self,
+        query: Query,
+        top_k: int = 10,
+        use_hybrid: bool = True,
+        expand_foreign_keys: bool = True,
+        max_expanded_tables: int = 3
     ) -> List[SchemaElement]:
         """Retrieve top-k schema elements relevant to the query.
 
-        Uses BGE-M3 hybrid retrieval (dense + sparse) for multilingual support.
+        Uses BGE-M3 hybrid retrieval (dense + sparse) for multilingual support,
+        with optional FK expansion to include related tables.
+
+        Two-stage retrieval:
+        1. Semantic retrieval: Get top_k columns using BGE-M3
+        2. FK expansion: Add columns from FK-related tables (if enabled)
+
+        Args:
+            query: Natural language query
+            top_k: Number of schema elements to retrieve via semantic search
+            use_hybrid: Use both dense and sparse retrieval (default: True)
+            expand_foreign_keys: If True, expand retrieval to include FK-related tables
+            max_expanded_tables: Max number of additional tables to add via FK expansion
+
+        Returns:
+            List of retrieved schema elements, ranked by relevance
+        """
+        # Stage 1: Semantic retrieval
+        retrieved = self._semantic_retrieve(query, top_k, use_hybrid)
+
+        # Stage 2: FK expansion (if enabled and FKs available)
+        if expand_foreign_keys and self.schema.foreign_keys:
+            retrieved = self._expand_with_foreign_keys(retrieved, max_expanded_tables)
+
+        return retrieved
+
+    def _semantic_retrieve(
+        self, query: Query, top_k: int, use_hybrid: bool
+    ) -> List[SchemaElement]:
+        """Stage 1: Semantic retrieval using BGE-M3.
 
         Args:
             query: Natural language query
             top_k: Number of schema elements to retrieve
-            use_hybrid: Use both dense and sparse retrieval (default: True)
+            use_hybrid: Use hybrid (dense + sparse) retrieval
 
         Returns:
-            List of retrieved schema elements, ranked by relevance
+            List of retrieved schema elements
         """
         # Fallback to pass-through mode if model not loaded
         if not self.model or self.dense_embeddings is None:
@@ -232,7 +266,7 @@ class SchemaRetriever:
             retrieved = [self.schema.columns[idx] for idx in top_k_indices]
 
             logger.debug(
-                f"Retrieved {len(retrieved)} schema elements "
+                f"Semantic retrieval: {len(retrieved)} columns "
                 f"(top score: {scores[top_k_indices[0]]:.3f})"
             )
 
@@ -241,6 +275,63 @@ class SchemaRetriever:
         except Exception as e:
             logger.error(f"Retrieval failed: {e}, falling back to pass-through")
             return self._passthrough_retrieve(top_k)
+
+    def _expand_with_foreign_keys(
+        self, retrieved: List[SchemaElement], max_expanded_tables: int
+    ) -> List[SchemaElement]:
+        """Stage 2: Expand retrieval with FK-related tables.
+
+        For each table in the retrieved columns, add ALL columns from FK-related tables.
+        This ensures JOIN queries have complete table schemas.
+
+        Args:
+            retrieved: Columns from semantic retrieval
+            max_expanded_tables: Max number of additional tables to include
+
+        Returns:
+            Expanded list of schema elements
+        """
+        # Get unique tables from retrieved columns
+        retrieved_tables = set()
+        for col in retrieved:
+            if '.' in col.name:
+                table_name = col.name.split('.', 1)[0]
+                retrieved_tables.add(table_name)
+
+        logger.debug(f"Retrieved tables: {retrieved_tables}")
+
+        # Find FK-related tables
+        related_tables = set()
+        for table in retrieved_tables:
+            for fk in self.schema.get_foreign_keys_for_table(table):
+                # Add both source and target tables
+                related_tables.add(fk.from_table)
+                related_tables.add(fk.to_table)
+
+        # Remove already-retrieved tables
+        new_tables = related_tables - retrieved_tables
+
+        # Limit expansion
+        if len(new_tables) > max_expanded_tables:
+            logger.debug(f"Limiting FK expansion from {len(new_tables)} to {max_expanded_tables} tables")
+            new_tables = set(list(new_tables)[:max_expanded_tables])
+
+        logger.debug(f"FK expansion: adding tables {new_tables}")
+
+        # Add ALL columns from new tables
+        expanded = retrieved.copy()
+        for col in self.schema.columns:
+            if '.' in col.name:
+                table_name = col.name.split('.', 1)[0]
+                if table_name in new_tables:
+                    expanded.append(col)
+
+        logger.info(
+            f"FK expansion: {len(retrieved)} → {len(expanded)} columns "
+            f"(+{len(new_tables)} tables via FKs)"
+        )
+
+        return expanded
 
     def _compute_dense_similarity(self, query_embedding: np.ndarray) -> np.ndarray:
         """Compute cosine similarity between query and schema embeddings.
