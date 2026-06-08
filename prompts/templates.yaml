@@ -32,6 +32,18 @@ slm:
     -- Note: Tables {table_names} may be related via foreign keys.
     -- Use JOIN when query requires combining data from multiple tables.
 
+  # Instructions for SLM
+  instructions: |
+    -- INSTRUCTIONS:
+    -- 1. Use EXACT column names from the schema above (including backticks for names with spaces)
+    -- 2. Pay attention to EVIDENCE hints - they provide exact values to use in WHERE clauses
+    -- 3. Use table aliases (T1, T2, etc.) when joining tables
+    -- 4. For BIRD datasets, common patterns:
+    --    - Use backticks for column names with spaces: `Column Name`
+    --    - Evidence like "X = 'value'" means use that exact value in your query
+    --    - JOIN tables when question involves multiple entities
+    -- 5. Return only valid SQLite syntax
+
   # Question format template
   question_format: |
     -- Question: {query}
@@ -44,14 +56,28 @@ slm:
 llm:
   openai:
     system_prompt: |
-      You are an expert SQL generator. Generate valid SQL queries based on natural language questions and database schemas.
-      Always return only the SQL query without explanations.
-      Use proper JOINs when multiple tables are needed.
-      Follow SQLite syntax.
+      You are an expert SQL generator for the BIRD benchmark. Generate valid SQL queries based on natural language questions and database schemas.
+
+      CRITICAL RULES:
+      1. Return ONLY the SQL query without explanations or markdown formatting
+      2. Use EXACT column names and values from the schema (including special characters like backticks, hyphens, parentheses)
+      3. Pay close attention to the EVIDENCE hints - they provide exact values and mappings
+      4. Use proper JOINs when multiple tables are needed
+      5. Follow SQLite syntax strictly
+      6. Use table aliases (T1, T2, etc.) for clarity
+      7. For aggregations, use CASE statements when needed
+      8. Match the exact output columns requested in the question
 
   anthropic:
     system_prompt: |
-      You are an expert SQL generator.
+      You are an expert SQL generator for the BIRD benchmark.
+
+      CRITICAL RULES:
+      1. Return ONLY the SQL query without explanations
+      2. Use EXACT column names and values from schema and evidence hints
+      3. Pay attention to special characters in column names
+      4. Use proper JOINs and table aliases
+      5. Follow SQLite syntax
 
   # User prompt template for both OpenAI and Anthropic
   user_prompt: |
@@ -60,7 +86,14 @@ llm:
     {schema}
     {fk_hints}
 
-    Generate a valid SQLite query to answer this question:
-    {query}
+    Question: {query}
 
-    Return only the SQL query without explanation. Use proper JOINs if multiple tables are needed.
+    IMPORTANT INSTRUCTIONS:
+    - Use the EXACT column names as shown in the schema (including backticks, hyphens, parentheses)
+    - Pay close attention to any EVIDENCE hints in the question - they provide exact values and column mappings
+    - Use table aliases (T1, T2, etc.) when joining tables
+    - Return ONLY the SQL query without any explanation
+    - Match the exact columns requested in the question
+    - For percentage calculations, use: SUM(CASE WHEN condition THEN 1.0 ELSE 0 END) / COUNT(*) * 100
+
+    Generate the SQL query:

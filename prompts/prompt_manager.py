@@ -91,6 +91,14 @@ class PromptManager:
         template = self.templates.get("slm", {}).get("fk_hint", "")
         return template.format(table_names=", ".join(table_names))
 
+    def get_slm_instructions(self) -> str:
+        """Get SLM instructions.
+
+        Returns:
+            Instructions string
+        """
+        return self.templates.get("slm", {}).get("instructions", "")
+
     def format_slm_question(self, query: str) -> str:
         """Format question section for SLM prompt.
 

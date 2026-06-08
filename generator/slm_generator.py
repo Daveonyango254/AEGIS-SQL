@@ -266,10 +266,13 @@ class SLMGenerator:
         table_names_list = list(tables.keys())
         fk_hints = prompt_mgr.get_slm_fk_hint(table_names_list)
 
+        # Get instructions
+        instructions = prompt_mgr.get_slm_instructions()
+
         # Get question format
         question_section = prompt_mgr.format_slm_question(query.text)
 
-        return f"{schema_str}{fk_hints}{examples}{question_section}"
+        return f"{schema_str}{fk_hints}{examples}{instructions}{question_section}"
 
     def _extract_sql_from_output(self, output: str, prompt: str) -> str:
         """Extract SQL from model output.
