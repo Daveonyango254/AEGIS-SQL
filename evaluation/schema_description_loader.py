@@ -54,44 +54,61 @@ def load_bird_descriptions(
         table_name = csv_file.stem  # filename without .csv
 
         try:
-            with open(csv_file, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
+            # Try multiple encodings to handle BIRD dataset encoding issues
+            encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            file_content = None
 
-                for row in reader:
-                    # BIRD CSV format:
-                    # - column_name: The actual column name
-                    # - column_description: Human-readable description
-                    # - value_description: Additional value semantics
-                    # - data_format: Data type information
+            for encoding in encodings:
+                try:
+                    with open(csv_file, 'r', encoding=encoding) as f:
+                        file_content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
 
-                    column_name = row.get('column_name', '').strip()
-                    if not column_name:
-                        continue
+            if file_content is None:
+                logger.warning(f"Failed to read {csv_file} with all attempted encodings")
+                continue
 
-                    # Build comprehensive description
-                    description_parts = []
+            # Parse CSV from decoded content
+            import io
+            reader = csv.DictReader(io.StringIO(file_content))
 
-                    # Main description
-                    col_desc = row.get('column_description', '').strip()
-                    if col_desc:
-                        description_parts.append(col_desc)
+            for row in reader:
+                # BIRD CSV format:
+                # - column_name: The actual column name
+                # - column_description: Human-readable description
+                # - value_description: Additional value semantics
+                # - data_format: Data type information
 
-                    # Value description (often contains important semantics)
-                    val_desc = row.get('value_description', '').strip()
-                    if val_desc and val_desc != col_desc:
-                        description_parts.append(f"Values: {val_desc}")
+                column_name = row.get('column_name', '').strip()
+                if not column_name:
+                    continue
 
-                    # Data format
-                    data_format = row.get('data_format', '').strip()
-                    if data_format and data_format.lower() not in ['text', 'integer', 'real']:
-                        description_parts.append(f"Format: {data_format}")
+                # Build comprehensive description
+                description_parts = []
 
-                    # Combine all parts
-                    full_description = " | ".join(description_parts)
+                # Main description
+                col_desc = row.get('column_description', '').strip()
+                if col_desc:
+                    description_parts.append(col_desc)
 
-                    # Store as "table.column" -> description
-                    key = f"{table_name}.{column_name}"
-                    descriptions[key] = full_description if full_description else column_name
+                # Value description (often contains important semantics)
+                val_desc = row.get('value_description', '').strip()
+                if val_desc and val_desc != col_desc:
+                    description_parts.append(f"Values: {val_desc}")
+
+                # Data format
+                data_format = row.get('data_format', '').strip()
+                if data_format and data_format.lower() not in ['text', 'integer', 'real']:
+                    description_parts.append(f"Format: {data_format}")
+
+                # Combine all parts
+                full_description = " | ".join(description_parts)
+
+                # Store as "table.column" -> description
+                key = f"{table_name}.{column_name}"
+                descriptions[key] = full_description if full_description else column_name
 
         except Exception as e:
             logger.warning(f"Failed to load descriptions from {csv_file}: {e}")
