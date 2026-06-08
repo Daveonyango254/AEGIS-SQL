@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/david/Downloads/eval_output/output/smoke_test_exp_10/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

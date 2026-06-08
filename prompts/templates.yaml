@@ -1,0 +1,66 @@
+# AEGIS-SQL Prompt Templates
+# Centralized prompt management for SQL generation
+
+# ============================================================================
+# SLM (Local) Prompts
+# ============================================================================
+slm:
+  # Few-shot examples for BIRD dataset patterns
+  examples:
+    - question: "Which schools are in Alameda County?"
+      sql: "SELECT `School Name` FROM frpm WHERE `County Name` = 'Alameda';"
+      description: "Simple filtering with column names containing spaces"
+
+    - question: "How many charter schools are there?"
+      sql: "SELECT COUNT(*) FROM frpm WHERE `Charter School (Y/N)` = 1;"
+      description: "Count aggregation with binary column"
+
+    - question: "What is the name of the school with highest math score?"
+      sql: "SELECT T2.SchoolName FROM scores AS T1 JOIN schools AS T2 ON T1.id = T2.id ORDER BY T1.math DESC LIMIT 1;"
+      description: "JOIN with ORDER BY and LIMIT"
+
+    - question: "How many students are in each district?"
+      sql: "SELECT district_name, COUNT(*) as student_count FROM schools GROUP BY district_name;"
+      description: "GROUP BY aggregation"
+
+    - question: "What is the average salary for employees in the Engineering department?"
+      sql: "SELECT AVG(T1.salary) FROM employees AS T1 JOIN departments AS T2 ON T1.dept_id = T2.id WHERE T2.name = 'Engineering';"
+      description: "JOIN with WHERE and aggregation"
+
+  # Foreign key hint template
+  fk_hint: |
+    -- Note: Tables {table_names} may be related via foreign keys.
+    -- Use JOIN when query requires combining data from multiple tables.
+
+  # Question format template
+  question_format: |
+    -- Question: {query}
+    -- SQL:
+
+
+# ============================================================================
+# LLM (Remote) Prompts
+# ============================================================================
+llm:
+  openai:
+    system_prompt: |
+      You are an expert SQL generator. Generate valid SQL queries based on natural language questions and database schemas.
+      Always return only the SQL query without explanations.
+      Use proper JOINs when multiple tables are needed.
+      Follow SQLite syntax.
+
+  anthropic:
+    system_prompt: |
+      You are an expert SQL generator.
+
+  # User prompt template for both OpenAI and Anthropic
+  user_prompt: |
+    Given the following SQLite database schema:
+
+    {schema}
+    {fk_hints}
+
+    Generate a valid SQLite query to answer this question:
+    {query}
+
+    Return only the SQL query without explanation. Use proper JOINs if multiple tables are needed.

@@ -17,6 +17,7 @@ import anthropic
 
 from config import LLMConfig
 from aegis_types import Query, SchemaElement, SQL, AbstractedPrompt
+from prompts.prompt_manager import get_prompt_manager
 
 
 class LLMFallback:
@@ -135,12 +136,16 @@ class LLMFallback:
         last_error = None
         for attempt in range(self.config.max_retries):
             try:
+                # Get system prompt from template
+                prompt_mgr = get_prompt_manager()
+                system_prompt = prompt_mgr.get_llm_system_prompt("openai")
+
                 response = self.client.chat.completions.create(
                     model=self.config.model,
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are an expert SQL generator. Generate valid SQL queries based on natural language questions and database schemas.",
+                            "content": system_prompt,
                         },
                         {"role": "user", "content": prompt},
                     ],
@@ -187,6 +192,10 @@ class LLMFallback:
         last_error = None
         for attempt in range(self.config.max_retries):
             try:
+                # Get system prompt from template
+                prompt_mgr = get_prompt_manager()
+                system_prompt = prompt_mgr.get_llm_system_prompt("anthropic")
+
                 response = self.client.messages.create(
                     model=self.config.model,
                     max_tokens=max_tokens,
@@ -194,7 +203,7 @@ class LLMFallback:
                     messages=[
                         {
                             "role": "user",
-                            "content": f"You are an expert SQL generator. {prompt}",
+                            "content": f"{system_prompt} {prompt}",
                         }
                     ],
                     timeout=self.config.timeout,

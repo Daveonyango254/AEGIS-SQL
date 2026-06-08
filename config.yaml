@@ -72,7 +72,7 @@ cost:
 router:
   threshold_complexity: 0.5  # Complexity threshold (0-1): >= threshold → REMOTE (lowered from 0.7 route ~98% to REMOTE)
   force_local: false  # Force all queries to local FSLM (overrides threshold)
-  force_remote: false  # Force all queries to remote FLLM (overrides threshold)
+  force_remote: true  # Force all queries to remote FLLM (overrides threshold)
   features:
     - query_token_count
     - schema_element_count

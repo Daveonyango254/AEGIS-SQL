@@ -18,6 +18,7 @@ from loguru import logger
 
 from config import SLMConfig
 from aegis_types import Query, SchemaElement, SQL
+from prompts.prompt_manager import get_prompt_manager
 
 
 class SLMGenerator:
@@ -255,28 +256,20 @@ class SLMGenerator:
                 schema_str += ",\n"
             schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
 
-        # Add FK hints if multiple tables present
-        if len(tables) > 1:
-            table_names = list(tables.keys())
-            fk_hints = f"-- Note: Tables {', '.join(table_names)} may be related via foreign keys.\n"
-            fk_hints += "-- Use JOIN when query requires combining data from multiple tables.\n\n"
+        # Load prompt manager for centralized templates
+        prompt_mgr = get_prompt_manager()
 
-        # Add few-shot examples to teach BIRD patterns
-        examples = """-- Example 1: List schools in Alameda County
--- Question: Which schools are in Alameda County?
--- SQL: SELECT `School Name` FROM frpm WHERE `County Name` = 'Alameda';
+        # Get few-shot examples from templates
+        examples = prompt_mgr.format_slm_examples()
 
--- Example 2: Count charter schools
--- Question: How many charter schools are there?
--- SQL: SELECT COUNT(*) FROM frpm WHERE `Charter School (Y/N)` = 1;
+        # Get FK hints if multiple tables
+        table_names_list = list(tables.keys())
+        fk_hints = prompt_mgr.get_slm_fk_hint(table_names_list)
 
--- Example 3: JOIN across tables (if multiple tables present)
--- Question: What is the name of the school with highest math score?
--- SQL: SELECT T2.SchoolName FROM scores AS T1 JOIN schools AS T2 ON T1.id = T2.id ORDER BY T1.math DESC LIMIT 1;
+        # Get question format
+        question_section = prompt_mgr.format_slm_question(query.text)
 
-"""
-
-        return f"{schema_str}{fk_hints}{examples}-- Question: {query.text}\n-- SQL:\nSELECT"
+        return f"{schema_str}{fk_hints}{examples}{question_section}"
 
     def _extract_sql_from_output(self, output: str, prompt: str) -> str:
         """Extract SQL from model output.
