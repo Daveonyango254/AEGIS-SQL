@@ -7,7 +7,7 @@ A production-grade implementation of **AEGIS-SQL**, a hybrid natural language to
 ## Architecture Overview
 
 **Agent Names:** In the system architecture, components are referred to by their agent names:
-- **Query Planner Agent** → Encompasses `SchemaRetriever` (schema extraction) + `ContentIndependentRouter` (routing logic)
+- **Query Planner Agent** → Encompasses `AmbiguityResolver` (query disambiguation) + `SchemaRetriever` (schema extraction) + `ContentIndependentRouter` (routing logic)
 - **Reviewer Agent** → Encompasses `GrammarVerifier`, `SchemaVerifier`, `ExecutionVerifier`, `FeedbackGenerator` classes
 
 ```
@@ -20,6 +20,11 @@ Input: Natural Language Query + Database Schema
    ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │                    QUERY PLANNER AGENT                            │
+│                                                                   │
+│  Step 0: Ambiguity Resolution (Optional)                          │
+│  └─> Detect temporal/schema/underspecified ambiguities            │
+│      • Auto-resolve with defaults, OR                            │
+│      • Request user clarification                                │
 │                                                                   │
 │  Step 1: Schema Extraction                                        │
 │  └─> Retrieve relevant schema elements via multilingual          │
@@ -311,7 +316,9 @@ aegis_sql/
 ├── __init__.py
 ├── config.py                    # Pydantic configuration models
 ├── config.yaml                  # Main configuration file
-├── types.py                     # Core type definitions
+├── aegis_types.py               # Core type definitions
+├── query_planner/               # Query disambiguation & planning
+│   └── ambiguity_resolver.py   # Detect & resolve query ambiguities
 ├── retriever/                   # Schema extraction (RAG)
 │   ├── schema_retriever.py
 │   └── embedding_models.py
@@ -336,7 +343,7 @@ aegis_sql/
 └── evaluation/                  # Evaluation framework
     ├── evaluator_ex.py         # EX metric
     ├── evaluator_ves.py        # VES metric
-    ├── metrics.py
+    ├── metrics.py              # Three-axis metrics
     └── README.md               # Evaluation instructions
 ```
 
