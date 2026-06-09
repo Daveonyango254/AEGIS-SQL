@@ -233,12 +233,14 @@ class SLMGenerator:
                     tables[table] = []
                 tables[table].append(elem)
 
-        # Extract FK relationships from schema (if available)
-        fk_hints = ""
-        if schema_elements and hasattr(schema_elements[0], '__dict__'):
-            # Try to get schema from first element (hacky but works)
-            # In practice, we'd pass schema separately, but this avoids breaking API
-            pass  # FKs will be added in a future enhancement
+        # Extract FK relationships from schema (from query.schema if available)
+        fk_relationships = []
+        if hasattr(query, 'schema') and query.schema and hasattr(query.schema, 'foreign_keys'):
+            # Get all FKs that involve tables in our retrieved schema
+            table_names_set = set(tables.keys())
+            for fk in query.schema.foreign_keys:
+                if fk.from_table in table_names_set or fk.to_table in table_names_set:
+                    fk_relationships.append(fk)
 
         # Format as CREATE TABLE statements with backticks for special characters
         schema_str = ""
@@ -256,15 +258,23 @@ class SLMGenerator:
                 schema_str += ",\n"
             schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
 
+        # Add explicit FK relationship hints
+        fk_hint_str = ""
+        if fk_relationships:
+            fk_hint_str = "-- FOREIGN KEY RELATIONSHIPS (Use these for JOINs):\n"
+            for fk in fk_relationships:
+                fk_hint_str += f"--   {fk.from_table}.{fk.from_column} = {fk.to_table}.{fk.to_column}\n"
+            fk_hint_str += "\n"
+
         # Load prompt manager for centralized templates
         prompt_mgr = get_prompt_manager()
 
         # Get few-shot examples from templates
         examples = prompt_mgr.format_slm_examples()
 
-        # Get FK hints if multiple tables
+        # Get generic FK hints if multiple tables (from template)
         table_names_list = list(tables.keys())
-        fk_hints = prompt_mgr.get_slm_fk_hint(table_names_list)
+        generic_fk_hints = prompt_mgr.get_slm_fk_hint(table_names_list)
 
         # Get instructions
         instructions = prompt_mgr.get_slm_instructions()
@@ -272,7 +282,8 @@ class SLMGenerator:
         # Get question format (with evidence if available)
         question_section = prompt_mgr.format_slm_question(query.text, query.evidence)
 
-        return f"{schema_str}{fk_hints}{examples}{instructions}{question_section}"
+        # Combine: schema → explicit FK hints → generic FK hints → examples → instructions → question
+        return f"{schema_str}{fk_hint_str}{generic_fk_hints}{examples}{instructions}{question_section}"
 
     def _extract_sql_from_output(self, output: str, prompt: str) -> str:
         """Extract SQL from model output.

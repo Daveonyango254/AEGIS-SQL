@@ -16,16 +16,28 @@ slm:
       description: "Count aggregation with binary column"
 
     - question: "What is the name of the school with highest math score?"
-      sql: "SELECT T2.SchoolName FROM scores AS T1 JOIN schools AS T2 ON T1.id = T2.id ORDER BY T1.math DESC LIMIT 1;"
-      description: "JOIN with ORDER BY and LIMIT"
+      sql: "SELECT T2.SchoolName FROM scores AS T1 JOIN schools AS T2 ON T1.school_id = T2.id ORDER BY T1.math DESC LIMIT 1;"
+      description: "JOIN using correct FK columns (school_id = id)"
+
+    - question: "What is the phone number of schools that have more than 100 SAT test takers?"
+      sql: "SELECT T2.Phone FROM satscores AS T1 INNER JOIN schools AS T2 ON T1.cds = T2.CDSCode WHERE T1.NumTstTakr > 100;"
+      description: "JOIN using exact FK columns from different tables (cds = CDSCode)"
 
     - question: "How many students are in each district?"
       sql: "SELECT district_name, COUNT(*) as student_count FROM schools GROUP BY district_name;"
       description: "GROUP BY aggregation"
 
-    - question: "What is the average salary for employees in the Engineering department?"
-      sql: "SELECT AVG(T1.salary) FROM employees AS T1 JOIN departments AS T2 ON T1.dept_id = T2.id WHERE T2.name = 'Engineering';"
-      description: "JOIN with WHERE and aggregation"
+    - question: "What is the enrollment of the school with the highest FRPM count?"
+      sql: "SELECT `Enrollment (K-12)` FROM frpm WHERE CDSCode = (SELECT CDSCode FROM frpm ORDER BY `FRPM Count (K-12)` DESC LIMIT 1);"
+      description: "Subquery returning single value for exact match"
+
+    - question: "List schools that are in districts with more than 5 schools"
+      sql: "SELECT school_name FROM schools WHERE district_id IN (SELECT district_id FROM schools GROUP BY district_id HAVING COUNT(*) > 5);"
+      description: "Subquery with IN for multi-value match"
+
+    - question: "What percentage of schools are charter schools?"
+      sql: "SELECT (CAST(SUM(CASE WHEN `Charter School (Y/N)` = 1 THEN 1 ELSE 0 END) AS REAL) / COUNT(*)) * 100 FROM schools;"
+      description: "Percentage calculation with CASE and CAST"
 
   # Foreign key hint template
   fk_hint: |
@@ -34,14 +46,20 @@ slm:
 
   # Instructions for SLM
   instructions: |
-    -- CRITICAL INSTRUCTIONS:
-    -- 1. **EVIDENCE IS KEY**: If the question contains "Evidence:", extract EXACT values and column mappings from it
-    --    Example: "Evidence: Frequency = 'POPLATEK TYDNE' refers to weekly" → Use WHERE frequency = 'POPLATEK TYDNE' (NOT 'weekly')
-    --    Example: "Evidence: label = '+' means carcinogenic" → Use WHERE label = '+' (NOT WHERE label LIKE '%carcinogenic%')
-    -- 2. Use EXACT column names from schema (with backticks if they have spaces/special chars): `Column Name`, `T-CHO`
-    -- 3. Use table aliases (T1, T2, etc.) when joining tables
-    -- 4. Match the EXACT output columns requested in the question
-    -- 5. Return only valid SQLite syntax without explanations
+    -- CRITICAL INSTRUCTIONS FOR ACCURACY:
+    -- 1. **EVIDENCE FIELD IS THE KEY TO SUCCESS**: If "Evidence:" is present, extract EXACT column names and values
+    --    Example: "Evidence: Frequency = 'POPLATEK TYDNE' refers to weekly" → Use WHERE frequency = 'POPLATEK TYDNE' (NEVER use 'weekly')
+    --    Example: "Evidence: label = '+' means carcinogenic" → Use WHERE label = '+' (NEVER use 'carcinogenic')
+    --    Example: "Evidence: isPromo = 1" → Use WHERE isPromo = 1 (NEVER use flavorName or other columns)
+    -- 2. **USE FOREIGN KEYS CORRECTLY**: When JOINing tables, use the EXACT FK columns shown above
+    --    Example: If FK shows "satscores.cds = schools.CDSCode", use: JOIN schools ON satscores.cds = schools.CDSCode
+    --    NEVER guess JOIN conditions like: JOIN ON T1.School = T2.sname (likely wrong!)
+    -- 3. **MATCH EXACT OUTPUT COLUMNS**: Read the question carefully for which column to return
+    --    Example: "What is the phone number" → Return Phone column (not PhoneNumber, not ContactInfo)
+    --    Example: "What is the enrollment" → Return `Enrollment (K-12)` (use exact column name with backticks)
+    -- 4. Use EXACT column names from schema (with backticks for special chars): `Column Name`, `T-CHO`, `FRPM Count (K-12)`
+    -- 5. For subqueries: Use = for single value, IN for multiple values, HAVING for group filters
+    -- 6. Return only valid SQLite syntax without explanations
 
   # Question format template
   question_format: |
@@ -57,26 +75,35 @@ llm:
     system_prompt: |
       You are an expert SQL generator for the BIRD benchmark. Generate valid SQL queries based on natural language questions and database schemas.
 
-      CRITICAL RULES:
+      CRITICAL RULES FOR HIGH ACCURACY:
       1. Return ONLY the SQL query without explanations or markdown formatting
-      2. Use EXACT column names and values from the schema (including special characters like backticks, hyphens, parentheses)
-      3. Pay close attention to the EVIDENCE hints - they provide exact values and mappings
-      4. Use proper JOINs when multiple tables are needed
-      5. Follow SQLite syntax strictly
+      2. **EVIDENCE HINTS ARE CRITICAL**: Extract EXACT column names and values from Evidence field
+         - Use the literal values shown (e.g., 'POPLATEK TYDNE'), NEVER translate them
+         - Use the exact column names mentioned in Evidence
+      3. **FOREIGN KEYS**: If FK relationships are provided, use EXACT columns for JOINs
+         - Example: If FK shows "T1.cds = T2.CDSCode", use those exact columns
+         - NEVER guess JOIN conditions
+      4. **OUTPUT COLUMNS**: Match the EXACT column requested in the question
+         - Example: "phone number" → Phone column (not PhoneNumber)
+         - Example: "type of education" → EdOpsName (not SchoolType)
+      5. Use EXACT column names from schema (including backticks, hyphens, parentheses)
       6. Use table aliases (T1, T2, etc.) for clarity
-      7. For aggregations, use CASE statements when needed
-      8. Match the exact output columns requested in the question
+      7. For aggregations: SUM(CASE WHEN condition THEN 1 ELSE 0 END)
+      8. For percentages: (COUNT(condition) * 100.0) / COUNT(*)
+      9. For subqueries: Use = for single value, IN for multiple values
 
   anthropic:
     system_prompt: |
       You are an expert SQL generator for the BIRD benchmark.
 
-      CRITICAL RULES:
+      CRITICAL RULES FOR HIGH ACCURACY:
       1. Return ONLY the SQL query without explanations
-      2. Use EXACT column names and values from schema and evidence hints
-      3. Pay attention to special characters in column names
-      4. Use proper JOINs and table aliases
-      5. Follow SQLite syntax
+      2. **EVIDENCE HINTS ARE CRITICAL**: Extract EXACT values and column names from Evidence field
+      3. **FOREIGN KEYS**: Use EXACT FK columns provided for JOINs (never guess)
+      4. **OUTPUT COLUMNS**: Match the EXACT column requested in the question
+      5. Use EXACT column names from schema (with backticks, hyphens, parentheses)
+      6. Use table aliases (T1, T2, etc.) for clarity
+      7. Follow SQLite syntax strictly
 
   # User prompt template for both OpenAI and Anthropic
   user_prompt: |
@@ -87,15 +114,21 @@ llm:
 
     Question: {query}
 
-    CRITICAL INSTRUCTIONS - READ CAREFULLY:
-    1. **EVIDENCE IS THE KEY TO SUCCESS**: If the question contains "Evidence:", extract EXACT values from it
-       - Example: "Evidence: Frequency = 'POPLATEK TYDNE' refers to weekly" → Use WHERE frequency = 'POPLATEK TYDNE' (NOT 'weekly')
-       - Example: "Evidence: label = '+' means carcinogenic" → Use WHERE label = '+' (NOT 'carcinogenic')
-       - Example: "Evidence: isPromo = 1 refers to promotional" → Use WHERE isPromo = 1 (NOT flavorName = 'promotional')
-    2. Use EXACT column names from schema with special characters: `Column Name`, `T-CHO`, `(%)`, etc.
-    3. Match the EXACT output columns requested (if asked for percentage, calculate percentage; if asked for ID, return ID)
-    4. Use table aliases (T1, T2, etc.) for clarity
-    5. For percentage: SUM(CASE WHEN condition THEN 1.0 ELSE 0 END) / COUNT(*) * 100
-    6. Return ONLY the SQL query without explanations
+    CRITICAL INSTRUCTIONS - FOLLOW EXACTLY FOR ACCURACY:
+    1. **EVIDENCE FIELD IS YOUR PRIMARY GUIDE**: If "Evidence:" is present, extract EXACT column names and literal values
+       - Example: "Evidence: Frequency = 'POPLATEK TYDNE' refers to weekly" → Use WHERE frequency = 'POPLATEK TYDNE' (NEVER 'weekly')
+       - Example: "Evidence: label = '+' means carcinogenic" → Use WHERE label = '+' (NEVER 'carcinogenic')
+       - Example: "Evidence: isPromo = 1 refers to promotional" → Use WHERE isPromo = 1 (NEVER flavorName = 'promotional')
+    2. **USE FOREIGN KEY RELATIONSHIPS**: If FK relationships are shown above, use EXACT columns for JOINs
+       - Example: If FK shows "satscores.cds = schools.CDSCode", use: JOIN schools ON satscores.cds = schools.CDSCode
+       - NEVER guess JOIN conditions like "JOIN ON T1.School = T2.sname"
+    3. **MATCH EXACT OUTPUT COLUMNS**: Read question carefully for which column to return
+       - "phone number" → Phone column (not ContactInfo)
+       - "type of education" → EdOpsName (not SchoolType)
+    4. Use EXACT column names from schema with backticks: `Column Name`, `T-CHO`, `FRPM Count (K-12)`
+    5. Use table aliases (T1, T2, etc.) for clarity
+    6. For percentages: (CAST(SUM(CASE WHEN condition THEN 1 ELSE 0 END) AS REAL) / COUNT(*)) * 100
+    7. For subqueries: Use = for single value, IN for multiple values
+    8. Return ONLY the SQL query without explanations
 
     Generate the SQL query:

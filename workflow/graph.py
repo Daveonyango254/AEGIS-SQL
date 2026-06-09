@@ -258,9 +258,14 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
     db_id = state.get("database_id", schema.database_id)
     retriever = cache.get_schema_retriever(db_id, schema)
 
-    # Retrieve schema elements
+    # Retrieve schema elements with FK expansion for better JOIN coverage
     query = state["query"]
-    schema_elements = retriever.retrieve(query, top_k=25)  # Increased from 10 to get more complete schema coverage
+    schema_elements = retriever.retrieve(
+        query,
+        top_k=40,  # Increased from 25 to 40 for better schema coverage (~35% of avg database)
+        expand_foreign_keys=True,  # Enable FK expansion to include related tables
+        max_expanded_tables=3  # Add up to 3 FK-related tables
+    )
 
     state["schema_elements"] = schema_elements
 

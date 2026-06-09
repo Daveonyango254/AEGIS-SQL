@@ -252,6 +252,15 @@ class LLMFallback:
                     tables[table] = []
                 tables[table].append(elem)
 
+        # Extract FK relationships from schema (from query.schema if available)
+        fk_relationships = []
+        if hasattr(abstracted_query, 'schema') and abstracted_query.schema and hasattr(abstracted_query.schema, 'foreign_keys'):
+            # Get all FKs that involve tables in our retrieved schema
+            table_names_set = set(tables.keys())
+            for fk in abstracted_query.schema.foreign_keys:
+                if fk.from_table in table_names_set or fk.to_table in table_names_set:
+                    fk_relationships.append(fk)
+
         # Format as CREATE TABLE statements
         schema_str = ""
         for table, cols in tables.items():
@@ -268,9 +277,14 @@ class LLMFallback:
                 schema_str += ",\n"
             schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
 
-        # Add FK hints if multiple tables present
+        # Add explicit FK relationship hints
         fk_hints = ""
-        if len(tables) > 1:
+        if fk_relationships:
+            fk_hints = "\nFOREIGN KEY RELATIONSHIPS (Use these exact columns for JOINs):\n"
+            for fk in fk_relationships:
+                fk_hints += f"  {fk.from_table}.{fk.from_column} = {fk.to_table}.{fk.to_column}\n"
+        elif len(tables) > 1:
+            # Generic hint if no explicit FKs available
             table_names = list(tables.keys())
             fk_hints = f"\nNote: Tables {', '.join(table_names)} may be related via foreign keys. Use JOIN when the query requires combining data from multiple tables.\n"
 
