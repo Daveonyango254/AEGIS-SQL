@@ -97,10 +97,20 @@ class BIRDLoader:
             query_dict: Query dictionary from dev.json
 
         Returns:
-            AEGIS Query object
+            AEGIS Query object with evidence hints included
         """
+        # Combine question with evidence hints (critical for BIRD accuracy!)
+        question = query_dict['question']
+        evidence = query_dict.get('evidence', '').strip()
+
+        # Include evidence as part of query text for better SQL generation
+        if evidence:
+            full_text = f"{question}\nEvidence: {evidence}"
+        else:
+            full_text = question
+
         return Query(
-            text=query_dict['question'],
+            text=full_text,
             language=Language.ENGLISH,
             database_id=query_dict['db_id'],
         )

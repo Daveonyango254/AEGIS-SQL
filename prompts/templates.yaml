@@ -34,15 +34,14 @@ slm:
 
   # Instructions for SLM
   instructions: |
-    -- INSTRUCTIONS:
-    -- 1. Use EXACT column names from the schema above (including backticks for names with spaces)
-    -- 2. Pay attention to EVIDENCE hints - they provide exact values to use in WHERE clauses
+    -- CRITICAL INSTRUCTIONS:
+    -- 1. **EVIDENCE IS KEY**: If the question contains "Evidence:", extract EXACT values and column mappings from it
+    --    Example: "Evidence: Frequency = 'POPLATEK TYDNE' refers to weekly" → Use WHERE frequency = 'POPLATEK TYDNE' (NOT 'weekly')
+    --    Example: "Evidence: label = '+' means carcinogenic" → Use WHERE label = '+' (NOT WHERE label LIKE '%carcinogenic%')
+    -- 2. Use EXACT column names from schema (with backticks if they have spaces/special chars): `Column Name`, `T-CHO`
     -- 3. Use table aliases (T1, T2, etc.) when joining tables
-    -- 4. For BIRD datasets, common patterns:
-    --    - Use backticks for column names with spaces: `Column Name`
-    --    - Evidence like "X = 'value'" means use that exact value in your query
-    --    - JOIN tables when question involves multiple entities
-    -- 5. Return only valid SQLite syntax
+    -- 4. Match the EXACT output columns requested in the question
+    -- 5. Return only valid SQLite syntax without explanations
 
   # Question format template
   question_format: |
@@ -88,12 +87,15 @@ llm:
 
     Question: {query}
 
-    IMPORTANT INSTRUCTIONS:
-    - Use the EXACT column names as shown in the schema (including backticks, hyphens, parentheses)
-    - Pay close attention to any EVIDENCE hints in the question - they provide exact values and column mappings
-    - Use table aliases (T1, T2, etc.) when joining tables
-    - Return ONLY the SQL query without any explanation
-    - Match the exact columns requested in the question
-    - For percentage calculations, use: SUM(CASE WHEN condition THEN 1.0 ELSE 0 END) / COUNT(*) * 100
+    CRITICAL INSTRUCTIONS - READ CAREFULLY:
+    1. **EVIDENCE IS THE KEY TO SUCCESS**: If the question contains "Evidence:", extract EXACT values from it
+       - Example: "Evidence: Frequency = 'POPLATEK TYDNE' refers to weekly" → Use WHERE frequency = 'POPLATEK TYDNE' (NOT 'weekly')
+       - Example: "Evidence: label = '+' means carcinogenic" → Use WHERE label = '+' (NOT 'carcinogenic')
+       - Example: "Evidence: isPromo = 1 refers to promotional" → Use WHERE isPromo = 1 (NOT flavorName = 'promotional')
+    2. Use EXACT column names from schema with special characters: `Column Name`, `T-CHO`, `(%)`, etc.
+    3. Match the EXACT output columns requested (if asked for percentage, calculate percentage; if asked for ID, return ID)
+    4. Use table aliases (T1, T2, etc.) for clarity
+    5. For percentage: SUM(CASE WHEN condition THEN 1.0 ELSE 0 END) / COUNT(*) * 100
+    6. Return ONLY the SQL query without explanations
 
     Generate the SQL query:
