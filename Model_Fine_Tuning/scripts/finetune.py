@@ -40,9 +40,7 @@ from transformers import (
 )
 
 
-class FineT
-
-uner:
+class FineTuner:
     """Fine-tuner for code models on Text-to-SQL task.
 
     Implements best practices for fine-tuning:
