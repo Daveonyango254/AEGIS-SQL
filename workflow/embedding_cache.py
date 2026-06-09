@@ -115,7 +115,8 @@ def save_embeddings(db_id: str, retriever: SchemaRetriever) -> None:
 def load_embeddings(
     db_id: str,
     config: EmbeddingConfig,
-    schema: Schema
+    schema: Schema,
+    shared_model=None
 ) -> Optional[SchemaRetriever]:
     """Load schema embeddings from disk.
 
@@ -123,6 +124,7 @@ def load_embeddings(
         db_id: Database identifier
         config: Embedding configuration
         schema: Database schema
+        shared_model: Pre-loaded BGE-M3 model to use for retrieval
 
     Returns:
         SchemaRetriever with loaded embeddings, or None if not found
@@ -160,8 +162,8 @@ def load_embeddings(
             )
             return None
 
-        # Create retriever without encoding
-        retriever = SchemaRetriever(config, schema, skip_encoding=True)
+        # Create retriever without encoding, but WITH shared model for retrieval
+        retriever = SchemaRetriever(config, schema, skip_encoding=True, shared_model=shared_model)
 
         # Load dense embeddings
         retriever.dense_embeddings = np.load(dense_path)

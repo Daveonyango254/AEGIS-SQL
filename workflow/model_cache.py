@@ -210,17 +210,17 @@ class ModelCache:
 
         retriever = None
 
+        # Get shared BGE-M3 model (needed even for cached retrievers)
+        shared_model = self.get_bgem3_model(embedding_config)
+
         # Try loading from disk
         if use_disk_cache:
             from workflow.embedding_cache import load_embeddings
-            retriever = load_embeddings(db_id, embedding_config, schema)
+            retriever = load_embeddings(db_id, embedding_config, schema, shared_model)
 
         # If disk load failed, create new retriever
         if retriever is None:
             logger.info(f"Cache MISS: Loading SchemaRetriever for {db_id}...")
-
-            # Get shared BGE-M3 model (load once, reuse for all retrievers)
-            shared_model = self.get_bgem3_model(embedding_config)
 
             # Create retriever with shared model
             retriever = SchemaRetriever(

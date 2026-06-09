@@ -64,8 +64,13 @@ class SchemaRetriever:
         self.sparse_embeddings: Optional[Dict] = None
         self._is_encoded = False
 
+        # Set shared model even when skipping encoding (needed for retrieval)
+        if shared_model is not None:
+            self.model = shared_model
+            logger.debug("Using shared BGE-M3 model")
+
         if skip_encoding:
-            logger.debug("Skipping encoding (reusing existing retriever)")
+            logger.debug("Skipping encoding (reusing existing embeddings)")
             return
 
         # Try to load BGE-M3 model
