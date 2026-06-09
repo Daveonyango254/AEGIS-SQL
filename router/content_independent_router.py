@@ -183,17 +183,19 @@ class ContentIndependentRouter:
         orderby_count = query_upper.count("ORDER BY")
 
         # Estimate complexity (normalized heuristic)
-        # Base complexity from query length
-        complexity_base = min(query_token_count / 50.0, 1.0)  # Normalize by 50 tokens
+        # ADJUSTED: Balanced weights to route 60-80% queries to LOCAL (threshold=0.7)
 
-        # Add complexity from structural elements
+        # Base complexity from query length
+        complexity_base = min(query_token_count / 50.0, 1.0)
+
+        # Add complexity from structural elements (slightly reduced weights)
         complexity_structure = (
-            join_count * 0.15 +
-            max(subquery_count, 0) * 0.20 +  # Subqueries are expensive
-            aggregate_count * 0.10 +
-            where_count * 0.05 +
-            groupby_count * 0.10 +
-            orderby_count * 0.05
+            join_count * 0.13 +
+            max(subquery_count, 0) * 0.18 +
+            aggregate_count * 0.09 +
+            where_count * 0.04 +
+            groupby_count * 0.09 +
+            orderby_count * 0.04
         )
 
         # Total complexity (clamped to [0, 1])
@@ -226,14 +228,14 @@ class ContentIndependentRouter:
         # Adjustment 1: Large schemas are harder
         schema_adjustment = 0.0
         if features.schema_element_count > 20:
-            schema_adjustment = 0.1
+            schema_adjustment = 0.09
         elif features.schema_element_count > 10:
             schema_adjustment = 0.05
 
         # Adjustment 2: Very short queries are easier
         token_adjustment = 0.0
         if features.query_token_count < 10:
-            token_adjustment = -0.1
+            token_adjustment = -0.10
 
         # Final score (clamped)
         final_score = base_complexity + schema_adjustment + token_adjustment

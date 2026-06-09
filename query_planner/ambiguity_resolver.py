@@ -24,6 +24,7 @@ References:
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from loguru import logger
+import json
 
 from aegis_types import Query, Schema, SchemaElement
 
@@ -119,27 +120,33 @@ class AmbiguityResolver:
         resolution_mode: str = "auto",
         auto_resolve_temporal: bool = True,
         temporal_default_days: int = 30,
-        confidence_threshold: float = 0.6
+        confidence_threshold: float = 0.6,
+        slm_generator=None
     ):
         """Initialize ambiguity resolver.
 
         Args:
-            detector_type: "rules" (fast, local) or "llm" (accurate, may be slow)
+            detector_type: "rules" (fast, local) or "llm" (accurate, uses local SLM)
             resolution_mode: "auto" (use defaults) or "interactive" (ask user)
             auto_resolve_temporal: Auto-resolve temporal ambiguities
             temporal_default_days: Default days for "recent" queries (default: 30)
             confidence_threshold: Minimum confidence to flag ambiguity (0-1)
+            slm_generator: Optional SLMGenerator instance for LLM-based detection (privacy-preserving)
         """
         self.detector_type = detector_type
         self.resolution_mode = resolution_mode
         self.auto_resolve_temporal = auto_resolve_temporal
         self.temporal_default_days = temporal_default_days
         self.confidence_threshold = confidence_threshold
+        self.slm_generator = slm_generator
 
-        # LLM detector initialization (future)
+        # LLM detector initialization (using local SLM for privacy)
         if self.detector_type == "llm":
-            logger.warning("LLM-based detection not yet implemented, falling back to rules")
-            self.detector_type = "rules"
+            if slm_generator is None or slm_generator.model is None:
+                logger.warning("LLM mode requires SLM, falling back to rules")
+                self.detector_type = "rules"
+            else:
+                logger.info("LLM-based detection enabled using local SLM (zero privacy leakage)")
 
         logger.info(
             f"✓ AmbiguityResolver initialized "
@@ -269,9 +276,10 @@ class AmbiguityResolver:
         return ambiguities
 
     def _detect_llm(self, query: Query, schema: Optional[Schema]) -> List[Ambiguity]:
-        """LLM-based ambiguity detection (higher accuracy, may add latency).
+        """LLM-based ambiguity detection using local SLM (zero privacy leakage).
 
-        Note: Not yet implemented. Falls back to rule-based detection.
+        Uses local SLM to detect ambiguities with higher accuracy than rule-based detection.
+        All processing happens on-premises with no external API calls.
 
         Args:
             query: Natural language query
@@ -280,8 +288,142 @@ class AmbiguityResolver:
         Returns:
             List of detected ambiguities
         """
-        logger.warning("LLM-based detection not yet implemented, using rules")
-        return self._detect_rules(query, schema)
+        if self.slm_generator is None or self.slm_generator.model is None:
+            logger.warning("SLM not available for LLM detection, falling back to rules")
+            return self._detect_rules(query, schema)
+
+        logger.debug("Using SLM for ambiguity detection (privacy-preserving)")
+
+        try:
+            # Build prompt for ambiguity detection
+            prompt = self._build_ambiguity_detection_prompt(query, schema)
+
+            # Tokenize input
+            inputs = self.slm_generator.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=2048,
+            )
+
+            # Move to device
+            import torch
+            if self.slm_generator.device != "auto":
+                inputs = {k: v.to(self.slm_generator.device) for k, v in inputs.items()}
+            else:
+                inputs = {k: v.to(self.slm_generator.model.device) for k, v in inputs.items()}
+
+            # Generate analysis
+            with torch.no_grad():
+                outputs = self.slm_generator.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    temperature=0.0,  # Deterministic output
+                    pad_token_id=self.slm_generator.tokenizer.eos_token_id,
+                )
+
+            # Decode response
+            input_length = inputs["input_ids"].shape[1]
+            generated_tokens = outputs[0][input_length:]
+            response = self.slm_generator.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+            logger.debug(f"SLM ambiguity detection response: {response[:200]}")
+
+            # Parse response to extract ambiguities
+            ambiguities = self._parse_ambiguity_response(response)
+            logger.info(f"SLM-based detection found {len(ambiguities)} ambiguities")
+            return ambiguities
+
+        except Exception as e:
+            logger.error(f"SLM ambiguity detection failed: {e}")
+            logger.warning("Falling back to rule-based detection")
+            return self._detect_rules(query, schema)
+
+    def _build_ambiguity_detection_prompt(self, query: Query, schema: Optional[Schema]) -> str:
+        """Build prompt for SLM ambiguity detection.
+
+        Args:
+            query: Natural language query
+            schema: Database schema (optional)
+
+        Returns:
+            Formatted prompt for ambiguity detection
+        """
+        schema_info = ""
+        if schema:
+            schema_info = f"\n\nAvailable schema elements:\n"
+            for col in schema.columns[:20]:  # Limit to prevent overflow
+                schema_info += f"- {col.name} ({col.data_type})\n"
+
+        prompt = f"""Task: Analyze the following natural language database query for ambiguities.
+
+Identify ambiguities in these categories:
+1. TEMPORAL: Unclear time references (e.g., "recent", "current", "old", "new")
+2. SCHEMA: Multiple matching schema elements or unclear column references
+3. UNDERSPECIFIED: Missing constraints (e.g., "top" without metric, "large" without threshold)
+
+Query: "{query.text}"{schema_info}
+
+Output a JSON list of ambiguities found. Each ambiguity should have:
+- type: "temporal", "schema", or "underspecified"
+- phrase: the ambiguous phrase from the query
+- reason: why it's ambiguous
+- candidates: list of possible interpretations
+- confidence: detection confidence (0.0-1.0)
+
+If no ambiguities found, output: []
+
+JSON output:"""
+
+        return prompt
+
+    def _parse_ambiguity_response(self, response: str) -> List[Ambiguity]:
+        """Parse SLM response to extract ambiguities.
+
+        Args:
+            response: Raw SLM response
+
+        Returns:
+            List of Ambiguity objects
+        """
+        ambiguities = []
+
+        try:
+            # Try to extract JSON from response
+            response = response.strip()
+
+            # Find JSON array in response
+            if "[" in response and "]" in response:
+                start = response.find("[")
+                end = response.rfind("]") + 1
+                json_str = response[start:end]
+
+                # Parse JSON
+                parsed = json.loads(json_str)
+
+                # Convert to Ambiguity objects
+                for item in parsed:
+                    if isinstance(item, dict):
+                        ambiguities.append(Ambiguity(
+                            type=item.get("type", "unknown"),
+                            phrase=item.get("phrase", ""),
+                            reason=item.get("reason", ""),
+                            candidates=item.get("candidates", []),
+                            confidence=float(item.get("confidence", 0.5))
+                        ))
+
+                # Filter by confidence threshold
+                ambiguities = [a for a in ambiguities if a.confidence >= self.confidence_threshold]
+
+            else:
+                logger.warning("No JSON array found in SLM response")
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON from SLM response: {e}")
+        except Exception as e:
+            logger.error(f"Error parsing ambiguity response: {e}")
+
+        return ambiguities
 
     def _auto_resolve(
         self,

@@ -54,12 +54,14 @@ class Query:
         text: Raw natural language question
         language: Language of the query
         database_id: Identifier for the target database
+        evidence: Domain knowledge hints for SQL generation (BIRD dataset specific)
         metadata: Optional metadata (e.g., query ID, timestamp)
     """
 
     text: str
     language: Language
     database_id: str
+    evidence: str = ""  # NEW: Evidence/hints from BIRD dataset
     metadata: Dict[str, str] = field(default_factory=dict)
 
 
@@ -151,6 +153,7 @@ class AbstractedPrompt:
         placeholder_map: Mapping from placeholders to original tokens
         epsilon: ε privacy budget used
         num_substitutions: Number of tokens abstracted
+        evidence: Domain knowledge hints (NOT abstracted, safe to send)
     """
 
     text: str
@@ -158,6 +161,7 @@ class AbstractedPrompt:
     placeholder_map: Dict[str, str]  # placeholder -> original token
     epsilon: float
     num_substitutions: int
+    evidence: str = ""  # NEW: Evidence is NOT sensitive, safe to include
 
 
 @dataclass

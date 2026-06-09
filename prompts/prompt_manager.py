@@ -99,17 +99,24 @@ class PromptManager:
         """
         return self.templates.get("slm", {}).get("instructions", "")
 
-    def format_slm_question(self, query: str) -> str:
+    def format_slm_question(self, query: str, evidence: str = "") -> str:
         """Format question section for SLM prompt.
 
         Args:
             query: Natural language query
+            evidence: Optional domain knowledge hints (BIRD dataset)
 
         Returns:
-            Formatted question string
+            Formatted question string with evidence if provided
         """
         template = self.templates.get("slm", {}).get("question_format", "")
-        return template.format(query=query)
+        formatted = template.format(query=query)
+
+        # Add evidence as a hint if provided
+        if evidence:
+            formatted += f"\n-- HINT: {evidence}"
+
+        return formatted
 
     def get_llm_system_prompt(self, provider: str = "openai") -> str:
         """Get LLM system prompt.
@@ -124,20 +131,27 @@ class PromptManager:
         return llm_templates.get(provider, {}).get("system_prompt", "")
 
     def format_llm_user_prompt(
-        self, schema: str, query: str, fk_hints: str = ""
+        self, schema: str, query: str, evidence: str = "", fk_hints: str = ""
     ) -> str:
         """Format LLM user prompt.
 
         Args:
             schema: Formatted schema string
             query: Natural language query
+            evidence: Optional domain knowledge hints (BIRD dataset)
             fk_hints: Foreign key hints (optional)
 
         Returns:
-            Formatted user prompt
+            Formatted user prompt with evidence if provided
         """
         template = self.templates.get("llm", {}).get("user_prompt", "")
-        return template.format(schema=schema, query=query, fk_hints=fk_hints)
+        formatted = template.format(schema=schema, query=query, fk_hints=fk_hints)
+
+        # Add evidence section if provided
+        if evidence:
+            formatted += f"\n\nDomain Knowledge:\n{evidence}"
+
+        return formatted
 
     def reload(self):
         """Reload templates from file.

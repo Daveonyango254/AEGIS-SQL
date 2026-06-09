@@ -137,6 +137,7 @@ class DPAbstractor:
             placeholder_map=placeholder_to_real,
             epsilon=self.epsilon,
             num_substitutions=len(placeholder_to_real),
+            evidence=query.evidence,  # NEW: Evidence is not sensitive, pass through
         )
 
         # Create reconstruction map
@@ -158,6 +159,7 @@ class DPAbstractor:
             placeholder_map={},
             epsilon=0.0,
             num_substitutions=0,
+            evidence=query.evidence,  # NEW: Pass evidence through
         )
         recon_map = ReconstructionMap(
             placeholder_to_real={},

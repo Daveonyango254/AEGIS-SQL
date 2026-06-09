@@ -137,6 +137,10 @@ class ModelCache:
         try:
             from FlagEmbedding import BGEM3FlagModel
 
+            logger.info(f"Loading BGE-M3 model: {embedding_config.model}")
+            logger.info(f"  Device: {embedding_config.device}")
+            logger.info(f"  Cache dir: {embedding_config.cache_dir}")
+
             use_fp16 = embedding_config.device == "cuda"
 
             self._bgem3_model = BGEM3FlagModel(
@@ -146,12 +150,22 @@ class ModelCache:
             )
 
             logger.info(f"✓ Loaded shared BGE-M3 model on {embedding_config.device}")
+            logger.info(f"  Model parameters: {sum(p.numel() for p in self._bgem3_model.model.parameters()) / 1e6:.1f}M")
 
-        except ImportError:
-            logger.warning("FlagEmbedding not installed. Embeddings disabled.")
+        except ImportError as e:
+            logger.error(f"❌ CRITICAL: FlagEmbedding not installed!")
+            logger.error(f"  Install with: pip install -U FlagEmbedding")
+            logger.error(f"  Error details: {e}")
+            logger.error(f"  Schema retrieval will use PASS-THROUGH mode (poor accuracy)")
             self._bgem3_model = None
         except Exception as e:
-            logger.error(f"Failed to load BGE-M3 model: {e}")
+            logger.error(f"❌ CRITICAL: Failed to load BGE-M3 model!")
+            logger.error(f"  Model: {embedding_config.model}")
+            logger.error(f"  Device: {embedding_config.device}")
+            logger.error(f"  Error: {e}")
+            logger.error(f"  Schema retrieval will use PASS-THROUGH mode (poor accuracy)")
+            import traceback
+            logger.error(f"  Traceback: {traceback.format_exc()}")
             self._bgem3_model = None
 
         return self._bgem3_model

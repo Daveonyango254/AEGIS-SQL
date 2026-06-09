@@ -269,8 +269,8 @@ class SLMGenerator:
         # Get instructions
         instructions = prompt_mgr.get_slm_instructions()
 
-        # Get question format
-        question_section = prompt_mgr.format_slm_question(query.text)
+        # Get question format (with evidence if available)
+        question_section = prompt_mgr.format_slm_question(query.text, query.evidence)
 
         return f"{schema_str}{fk_hints}{examples}{instructions}{question_section}"
 

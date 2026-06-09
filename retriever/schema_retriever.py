@@ -84,10 +84,20 @@ class SchemaRetriever:
                 f"({len(self.schema.columns)} columns indexed)"
             )
         except Exception as e:
-            logger.warning(
-                f"Failed to load embedding model: {e}. "
-                f"Falling back to pass-through mode."
+            logger.error(
+                f"❌ CRITICAL: Failed to initialize embedding model!"
             )
+            logger.error(f"  Database: {schema.db_id}")
+            logger.error(f"  Model: {config.model}")
+            logger.error(f"  Error: {e}")
+            logger.error(
+                f"  ⚠️  Falling back to PASS-THROUGH mode - accuracy will be SEVERELY degraded!"
+            )
+            logger.error(
+                f"  ⚠️  Expected EX accuracy drop: 30-40 percentage points"
+            )
+            import traceback
+            logger.debug(f"  Traceback: {traceback.format_exc()}")
             self.model = None
             self._is_encoded = False
 
@@ -223,7 +233,12 @@ class SchemaRetriever:
         """
         # Fallback to pass-through mode if model not loaded
         if not self.model or self.dense_embeddings is None:
-            logger.debug("Model not loaded, using pass-through mode")
+            logger.warning(
+                f"⚠️  PASS-THROUGH MODE ACTIVE - returning first {top_k} columns WITHOUT semantic matching!"
+            )
+            logger.warning(
+                f"  This will likely result in WRONG table selection and LOW accuracy."
+            )
             return self._passthrough_retrieve(top_k)
 
         try:

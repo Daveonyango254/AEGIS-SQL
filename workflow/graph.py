@@ -159,12 +159,18 @@ def ambiguity_resolution_node(state: AEGISState) -> AEGISState:
         config = AEGISConfig.from_yaml("config.yaml")
         amb_config = config.ambiguity
 
+        # Get SLM generator if LLM mode is enabled (for privacy-preserving ambiguity detection)
+        slm_generator = None
+        if amb_config.detector_type == "llm":
+            slm_generator = cache.get_slm_generator()
+
         cache._ambiguity_resolver = AmbiguityResolver(
             detector_type=amb_config.detector_type,
             resolution_mode=amb_config.resolution_mode,
             auto_resolve_temporal=amb_config.auto_resolve_temporal,
             temporal_default_days=amb_config.temporal_default_days,
-            confidence_threshold=amb_config.confidence_threshold
+            confidence_threshold=amb_config.confidence_threshold,
+            slm_generator=slm_generator
         )
 
     resolver = cache._ambiguity_resolver
@@ -403,6 +409,7 @@ def fllm_generation_node(state: AEGISState) -> AEGISState:
             placeholder_map={},
             epsilon=0.0,
             num_substitutions=0,
+            evidence=query.evidence,  # NEW: Pass evidence through
         )
 
     sql = generator.generate(abstracted_prompt, schema_elements)

@@ -274,9 +274,14 @@ class LLMFallback:
             table_names = list(tables.keys())
             fk_hints = f"\nNote: Tables {', '.join(table_names)} may be related via foreign keys. Use JOIN when the query requires combining data from multiple tables.\n"
 
+        # Add evidence section if available
+        evidence_section = ""
+        if abstracted_query.evidence:
+            evidence_section = f"\nDomain Knowledge:\n{abstracted_query.evidence}\n"
+
         prompt = f"""Given the following SQLite database schema:
 
-{schema_str}{fk_hints}
+{schema_str}{fk_hints}{evidence_section}
 Generate a valid SQLite query to answer this question:
 {abstracted_query.text}
 
