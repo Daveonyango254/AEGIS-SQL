@@ -1,0 +1,67 @@
+# Fine-tuning configuration for deepseek-ai/deepseek-coder-6.7b-instruct
+# DeepSeek-Coder: 6.7B parameter code-optimized multilingual model
+
+model:
+  name: "deepseek-ai/deepseek-coder-6.7b-instruct"
+  trust_remote_code: true
+  torch_dtype: "float16"   # DeepSeek uses float16
+  device_map: "auto"
+
+# LoRA configuration (Parameter-Efficient Fine-Tuning)
+lora:
+  r: 16                    # LoRA rank
+  lora_alpha: 32           # Alpha scaling
+  lora_dropout: 0.05       # Regularization
+  target_modules:          # DeepSeek architecture
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# Training hyperparameters
+training:
+  num_epochs: 3
+  per_device_train_batch_size: 4    # Good batch size for 6.7B
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4    # Effective batch = 16
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1                 # 10% warmup
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 1.0
+  logging_steps: 50
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 3
+  fp16: true                        # Use fp16 for DeepSeek
+  bf16: false
+  gradient_checkpointing: true
+  optim: "adamw_torch"
+  seed: 42
+
+# Data configuration
+data:
+  train_file: "../data/bird_train_formatted.json"
+  eval_file: "../data/bird_eval_formatted.json"
+  max_seq_length: 2048
+  preprocessing_num_workers: 4
+
+# Output configuration
+output:
+  output_dir: "../checkpoints/deepseek"
+  hub_model_id: "Daveonyango254/aegis-sql-deepseek-coder-67b-lora"
+  push_to_hub: true
+  hub_strategy: "checkpoint"
+  hub_private_repo: false
+
+# Early stopping
+early_stopping:
+  enabled: true
+  patience: 3
+  metric: "eval_loss"
+  greater_is_better: false

@@ -1,0 +1,67 @@
+# Fine-tuning configuration for microsoft/Phi-4-mini-instruct
+# Phi-4: 14B parameter multilingual reasoning model
+
+model:
+  name: "microsoft/Phi-4-mini-instruct"
+  trust_remote_code: true
+  torch_dtype: "bfloat16"  # Phi-4 uses bfloat16
+  device_map: "auto"
+
+# LoRA configuration (Parameter-Efficient Fine-Tuning)
+lora:
+  r: 16                    # LoRA rank (16 for good balance)
+  lora_alpha: 32           # Alpha scaling (typically 2*r)
+  lora_dropout: 0.05       # Dropout to prevent overfitting
+  target_modules:          # Modules to apply LoRA to
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# Training hyperparameters
+training:
+  num_epochs: 3
+  per_device_train_batch_size: 2    # Small batch size for 14B model
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 8    # Effective batch = 2 * 8 = 16
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1                 # 10% warmup steps
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 1.0
+  logging_steps: 50
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 3
+  fp16: false                       # Use bf16 instead for Phi-4
+  bf16: true
+  gradient_checkpointing: true      # Save memory
+  optim: "adamw_torch"
+  seed: 42
+
+# Data configuration
+data:
+  train_file: "../data/bird_train_formatted.json"
+  eval_file: "../data/bird_eval_formatted.json"
+  max_seq_length: 2048
+  preprocessing_num_workers: 4
+
+# Output configuration
+output:
+  output_dir: "../checkpoints/phi4"
+  hub_model_id: "Daveonyango254/aegis-sql-phi4-lora"
+  push_to_hub: true
+  hub_strategy: "checkpoint"        # Push each checkpoint
+  hub_private_repo: false
+
+# Early stopping (prevent overfitting)
+early_stopping:
+  enabled: true
+  patience: 3                       # Stop if no improvement for 3 evals
+  metric: "eval_loss"
+  greater_is_better: false
