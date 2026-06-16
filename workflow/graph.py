@@ -117,8 +117,15 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
     )
     workflow.add_edge("reconstruction", "verification")
 
-    # Verification → END
-    workflow.add_edge("verification", END)
+    # Verification → (repair local path) OR END
+    workflow.add_conditional_edges(
+        "verification",
+        should_repair,
+        {
+            True: "fslm_generation",  # Self-correction: regenerate with feedback
+            False: END,
+        },
+    )
 
     # Compile graph
     graph = workflow.compile()
@@ -260,12 +267,32 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
 
     # Retrieve schema elements with FK expansion for better JOIN coverage
     query = state["query"]
+    cfg = cache._config
+    top_k = cfg.slm.retrieval_top_k if cfg else 80
     schema_elements = retriever.retrieve(
         query,
-        top_k=40,  # Increased from 25 to 40 for better schema coverage (~35% of avg database)
+        top_k=top_k,  # Raised so needed columns are not dropped on larger schemas
         expand_foreign_keys=True,  # Enable FK expansion to include related tables
         max_expanded_tables=3  # Add up to 3 FK-related tables
     )
+
+    # Value grounding: attach sampled DB values / value-linking hints so the model
+    # uses real literals (e.g. 'Continuation School', not 'Continuation').
+    db_path = state.get("db_path")
+    if cfg and cfg.slm.enable_value_grounding and db_path and db_path != ":memory:":
+        try:
+            from retriever.value_sampler import get_value_hints
+            from dataclasses import replace
+
+            hints = get_value_hints(db_path, schema_elements, query.text)
+            if hints:
+                schema_elements = [
+                    replace(e, example_values=hints.get(e.name, e.example_values))
+                    for e in schema_elements
+                ]
+                logger.info(f"VALUE_GROUNDING: attached hints for {len(hints)} columns")
+        except Exception as e:
+            logger.warning(f"Value grounding skipped: {e}")
 
     state["schema_elements"] = schema_elements
 
@@ -369,11 +396,49 @@ def fslm_generation_node(state: AEGISState) -> AEGISState:
     from workflow.model_cache import get_cache
     cache = get_cache()
     generator = cache.get_slm_generator()
+    cfg = cache._config
 
-    # Generate SQL
     query = state["query"]
     schema_elements = state.get("schema_elements", [])
-    sql = generator.generate(query, schema_elements)
+    db_path = state.get("db_path")
+
+    # Track generation count to bound the self-correction loop.
+    state["generation_count"] = state.get("generation_count", 0) + 1
+
+    # On a repair pass, feed the verifier's structured feedback back to the model.
+    feedback = None
+    prev_vr = state.get("verification_result")
+    if prev_vr is not None and getattr(prev_vr, "structured_feedback", None):
+        feedback = prev_vr.structured_feedback.get("feedback")
+
+    n = cfg.slm.num_candidates if cfg else 8
+    sel_temp = cfg.slm.selection_temperature if cfg else 0.8
+
+    candidates = generator.generate_candidates(
+        query, schema_elements, n=n, temperature=sel_temp, feedback=feedback
+    )
+    candidate_texts = [c.text for c in candidates if c.text]
+
+    state.pop("_candidate_exec", None)
+    sql = candidates[0] if candidates else generator.generate(query, schema_elements)
+
+    # Execution-guided selection: run candidates against the real DB and pick by
+    # non-empty + majority-vote agreement on the result set.
+    if db_path and db_path != ":memory:" and len(candidate_texts) > 1:
+        try:
+            from generator.candidate_selector import select_best
+            from aegis_types import SQL as SQLType
+
+            timeout = cfg.verifier.timeout_seconds if cfg else 5
+            info = select_best(candidate_texts, db_path, timeout=timeout)
+            sql = SQLType(text=info["best_sql"], dialect="sqlite", source="slm", verified=False)
+            state["_candidate_exec"] = info
+            logger.info(
+                f"CANDIDATE_SELECTION: {info['num_executed']}/{info['num_candidates']} executed, "
+                f"winner agreed by {info['num_agree']} (nonempty={info['num_nonempty']})"
+            )
+        except Exception as e:
+            logger.warning(f"Candidate selection failed, using greedy: {e}")
 
     state["sql"] = sql
     state["generation_source"] = "slm"
@@ -509,43 +574,91 @@ def verification_node(state: AEGISState) -> AEGISState:
     schema = state.get("schema")
     db_path = state.get("db_path", ":memory:")
 
-    # For now, create a simplified verification result
-    # TODO: Implement actual 3-stage verification with grammar, schema, execution
+    from workflow.model_cache import get_cache
+    cfg = get_cache()._config
+    vcfg = cfg.verifier if cfg else None
 
-    try:
-        # Simplified verification: just mark as passed
-        # TODO: Call actual verifiers
-        verification_result = VerificationResult(
-            status=VerificationStatus.PASS,
-            grammar_valid=True,
-            schema_valid=True,
-            execution_valid=True,
-            error_message=None,
-            structured_feedback=None,
-            execution_result=None,
-        )
+    grammar_valid = True
+    schema_valid = True
+    execution_valid = True
+    status = VerificationStatus.PASS
+    error_message = None
+    execution_result = None
 
-        sql.verified = True
-        sql.verification_result = verification_result
+    # --- Stage 1: Grammar (sqlglot parse) ---
+    ast = None
+    if vcfg is None or vcfg.grammar_check:
+        try:
+            gv = GrammarVerifier(dialect=sql.dialect or "sqlite")
+            grammar_valid, error_message = gv.verify(sql)
+            if grammar_valid:
+                ast = gv.parse_to_ast(sql.text)
+            else:
+                status = VerificationStatus.GRAMMAR_FAIL
+        except Exception as e:
+            logger.warning(f"Grammar verification errored, treating as pass: {e}")
 
+    # --- Stage 2: Schema (table/column existence) ---
+    if status == VerificationStatus.PASS and schema is not None and (vcfg is None or vcfg.schema_check):
+        try:
+            sv = SchemaVerifier(schema)
+            schema_valid, schema_err = sv.verify(sql, ast)
+            if not schema_valid:
+                status = VerificationStatus.SCHEMA_FAIL
+                error_message = schema_err
+        except Exception as e:
+            logger.warning(f"Schema verification errored, treating as pass: {e}")
+
+    # --- Stage 3: Execution (reuse candidate-selection result if available) ---
+    exec_enabled = vcfg is None or vcfg.execution_check_slm
+    if status == VerificationStatus.PASS and exec_enabled and db_path and db_path != ":memory:":
+        exec_info = state.get("_candidate_exec")
+        if exec_info is not None:
+            execution_valid = exec_info.get("exec_ok", True)
+            if not execution_valid:
+                status = VerificationStatus.EXECUTION_FAIL
+                error_message = exec_info.get("error")
+        else:
+            try:
+                ev = ExecutionVerifier(
+                    schema,
+                    db_path,
+                    sample_size=vcfg.sample_size if vcfg else 100,
+                    timeout=vcfg.timeout_seconds if vcfg else 5,
+                )
+                execution_valid, exec_err, execution_result = ev.verify(sql)
+                ev.close()
+                if not execution_valid:
+                    status = VerificationStatus.EXECUTION_FAIL
+                    error_message = exec_err
+            except Exception as e:
+                logger.warning(f"Execution verification errored, treating as pass: {e}")
+
+    # --- Structured feedback for the self-correction loop ---
+    structured_feedback = None
+    verification_result = VerificationResult(
+        status=status,
+        grammar_valid=grammar_valid,
+        schema_valid=schema_valid,
+        execution_valid=execution_valid,
+        error_message=error_message,
+        structured_feedback=None,
+        execution_result=execution_result,
+    )
+    if status != VerificationStatus.PASS:
+        try:
+            fb = FeedbackGenerator().generate(verification_result)
+            if fb:
+                structured_feedback = {"feedback": fb}
+                verification_result.structured_feedback = structured_feedback
+        except Exception as e:
+            logger.debug(f"Feedback generation failed: {e}")
+        logger.info(f"VERIFICATION_FAILED: {status.value} - {error_message}")
+    else:
         logger.info("VERIFICATION_PASSED")
 
-    except Exception as e:
-        logger.error(f"Verification failed: {e}")
-        verification_result = VerificationResult(
-            status=VerificationStatus.EXECUTION_FAIL,
-            grammar_valid=True,
-            schema_valid=True,
-            execution_valid=False,
-            error_message=str(e),
-            structured_feedback=None,
-            execution_result=None,
-        )
-        sql.verified = False
-        sql.verification_result = verification_result
-
-        logger.info("VERIFICATION_FAILED")
-
+    sql.verified = status == VerificationStatus.PASS
+    sql.verification_result = verification_result
     state["verification_result"] = verification_result
 
     return state
@@ -578,3 +691,39 @@ def should_reconstruct(state: AEGISState) -> bool:
         True if reconstruction_map exists, False otherwise
     """
     return state.get("reconstruction_map") is not None
+
+
+def should_repair(state: AEGISState) -> bool:
+    """Determine if a failed local query should be regenerated with feedback.
+
+    Bounds the self-correction loop by ``verifier.max_repair_attempts`` and only
+    repairs the LOCAL (FSLM) path — the remote path goes straight to END.
+
+    Args:
+        state: Current workflow state
+
+    Returns:
+        True to loop back to fslm_generation, False to end.
+    """
+    vr = state.get("verification_result")
+    if vr is None or vr.status == VerificationStatus.PASS:
+        return False
+
+    # Only repair the local path.
+    if state.get("routing_decision") != RoutingDecision.LOCAL:
+        return False
+
+    from workflow.model_cache import get_cache
+    cfg = get_cache()._config
+    max_repairs = cfg.verifier.max_repair_attempts if cfg else 1
+
+    # generation_count == number of FSLM generations so far (initial + repairs).
+    generations = state.get("generation_count", 1)
+    if generations > max_repairs:
+        return False
+
+    logger.info(
+        f"SELF_CORRECTION: regenerating (attempt {generations}/{max_repairs}) "
+        f"after {vr.status.value}"
+    )
+    return True

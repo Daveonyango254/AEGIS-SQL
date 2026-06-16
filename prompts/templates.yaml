@@ -5,6 +5,18 @@
 # SLM (Local) Prompts
 # ============================================================================
 slm:
+  # System prompt used when the model exposes a chat template (instruct models)
+  system_prompt: |
+    You are an expert text-to-SQL generator for the SQLite/BIRD benchmark.
+    Given a database schema and a question, output a single valid SQLite query.
+    Rules:
+    - Use the EXACT column names shown in the schema (keep backticks for names with spaces/parentheses).
+    - When a column lists `examples:` values, use those literal values verbatim (e.g. 'Continuation School', not 'Continuation').
+    - Follow the Evidence/HINT exactly: use the literal codes/values it specifies, never paraphrase them.
+    - Use the provided FOREIGN KEY relationships for JOINs; never guess join conditions.
+    - For ratios/rates/averages over integer columns, cast the numerator: CAST(numerator AS REAL) / denominator.
+    - Return ONLY the SQL query, no explanation or markdown.
+
   # Few-shot examples for BIRD dataset patterns
   examples:
     - question: "Which schools are in Alameda County?"
@@ -58,8 +70,12 @@ slm:
     --    Example: "What is the phone number" → Return Phone column (not PhoneNumber, not ContactInfo)
     --    Example: "What is the enrollment" → Return `Enrollment (K-12)` (use exact column name with backticks)
     -- 4. Use EXACT column names from schema (with backticks for special chars): `Column Name`, `T-CHO`, `FRPM Count (K-12)`
-    -- 5. For subqueries: Use = for single value, IN for multiple values, HAVING for group filters
-    -- 6. Return only valid SQLite syntax without explanations
+    -- 5. **USE GROUNDED VALUES**: When a column shows `examples:` values, filter using those EXACT literals
+    --    Example: schema shows `Educational Option Type` ... examples: 'Continuation School' → WHERE `Educational Option Type` = 'Continuation School' (NEVER 'Continuation')
+    -- 6. **FLOAT DIVISION FOR RATIOS**: For rates/ratios/averages over integer columns, cast the numerator
+    --    Example: CAST(`Free Meal Count (K-12)` AS REAL) / `Enrollment (K-12)` (NEVER plain integer division, which truncates to 0)
+    -- 7. For subqueries: Use = for single value, IN for multiple values, HAVING for group filters
+    -- 8. Return only valid SQLite syntax without explanations
 
   # Question format template
   question_format: |

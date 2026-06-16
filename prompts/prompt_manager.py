@@ -99,6 +99,14 @@ class PromptManager:
         """
         return self.templates.get("slm", {}).get("instructions", "")
 
+    def get_slm_system_prompt(self) -> str:
+        """Get the SLM system prompt (for chat-template models).
+
+        Returns:
+            System prompt string (empty if not defined in templates)
+        """
+        return self.templates.get("slm", {}).get("system_prompt", "")
+
     def format_slm_question(self, query: str, evidence: str = "") -> str:
         """Format question section for SLM prompt.
 

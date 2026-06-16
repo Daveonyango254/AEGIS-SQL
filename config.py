@@ -41,6 +41,36 @@ class SLMConfig(BaseModel):
     trust_remote_code: bool = Field(default=True, description="Trust remote code from HuggingFace")
     adapter_path: Optional[str] = Field(default=None, description="LoRA adapter path for fine-tuned SLM")
 
+    # --- Harness optimization knobs (all default-on, individually toggleable) ---
+    max_input_length: int = Field(
+        default=8192,
+        description="Max prompt tokens (raised from 2048 so large schemas don't truncate the question)",
+    )
+    use_chat_template: bool = Field(
+        default=True,
+        description="Apply the tokenizer chat template (system+user) for instruct models",
+    )
+    num_candidates: int = Field(
+        default=8,
+        description="Number of candidates for execution-guided self-consistency (1 = single greedy decode)",
+    )
+    selection_temperature: float = Field(
+        default=0.8,
+        description="Sampling temperature used for the non-greedy candidates",
+    )
+    enable_value_grounding: bool = Field(
+        default=True,
+        description="Inject sampled DB values / value-linking hints into the prompt",
+    )
+    enable_cast_fix: bool = Field(
+        default=True,
+        description="Wrap division numerators in CAST(... AS REAL) to fix integer-division ratio bugs",
+    )
+    retrieval_top_k: int = Field(
+        default=80,
+        description="Number of schema columns retrieved before FK expansion",
+    )
+
 
 class LLMConfig(BaseModel):
     """Large language model configuration for remote fallback (FLLM)."""
@@ -164,6 +194,10 @@ class VerifierConfig(BaseModel):
     )
     sample_size: int = Field(default=100, description="Number of rows for execution verification")
     timeout_seconds: int = Field(default=5, description="Execution timeout per query")
+    max_repair_attempts: int = Field(
+        default=1,
+        description="Max self-correction regenerations when verification fails (0 disables the repair loop)",
+    )
 
 
 class EvaluationConfig(BaseModel):
