@@ -84,6 +84,20 @@ class LLMConfig(BaseModel):
     max_retries: int = Field(default=3, description="Maximum number of retries on failure")
     retry_delay: float = Field(default=1.0, description="Initial delay between retries (exponential backoff)")
 
+    # --- Harness optimization knobs (mirror the local path; toggleable for ablation) ---
+    num_candidates: int = Field(
+        default=5,
+        description="Remote candidates for execution-guided selection (1 = single call). Each costs an API request.",
+    )
+    selection_temperature: float = Field(
+        default=0.7,
+        description="Sampling temperature for the non-greedy remote candidates",
+    )
+    enable_cast_fix: bool = Field(
+        default=True,
+        description="Wrap division numerators in CAST(... AS REAL) on remote output too",
+    )
+
 
 class SensitivityPolicyConfig(BaseModel):
     """Sensitivity policy configuration."""
