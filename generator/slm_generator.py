@@ -19,6 +19,17 @@ from loguru import logger
 from config import SLMConfig
 from aegis_types import Query, SchemaElement, SQL
 from prompts.prompt_manager import get_prompt_manager
+from generator.sql_postprocess import finalize_sql
+
+# Default system prompt used when templates.yaml does not define one.
+_DEFAULT_SLM_SYSTEM_PROMPT = (
+    "You are an expert text-to-SQL generator for the SQLite/BIRD benchmark. "
+    "Given a database schema and a question, output a single valid SQLite query. "
+    "Use the exact column names and literal values shown in the schema "
+    "(prefer values listed under 'examples:'). For ratios or averages of "
+    "integer columns, cast the numerator with CAST(... AS REAL) to avoid "
+    "integer division. Return only the SQL query."
+)
 
 
 class SLMGenerator:
@@ -130,56 +141,187 @@ class SLMGenerator:
         logger.debug(f"Generating SQL with FSLM: {self.config.model}")
 
         try:
-            # Format prompt
-            prompt = self._format_prompt(query, schema_elements)
-
-            # Tokenize input
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=2048,
+            inputs = self._build_inputs(query, schema_elements)
+            texts = self._run_generation(
+                inputs,
+                max_tokens=max_tokens,
+                do_sample=temperature > 0,
+                temperature=temperature,
+                num_return_sequences=1,
             )
-
-            # Move inputs to device
-            if self.device != "auto":
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            else:
-                inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-
-            # Generate SQL
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature if temperature > 0 else None,
-                    do_sample=temperature > 0,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                )
-
-            # Decode only the newly generated tokens (skip the input prompt)
-            input_length = inputs["input_ids"].shape[1]
-            generated_tokens = outputs[0][input_length:]
-            generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-
-            # Log raw output for debugging
+            generated_text = texts[0] if texts else ""
             logger.debug(f"Raw model output (first 500 chars): {generated_text[:500]}")
-
-            # Extract SQL from output
-            sql_text = self._extract_sql_from_output(generated_text, "")  # No need to remove prompt now
+            sql_text = self._finalize(generated_text)
             logger.debug(f"Extracted SQL: {sql_text}")
 
-            return SQL(
-                text=sql_text,
-                dialect="sqlite",
-                source="slm",
-                verified=False,
-            )
+            return SQL(text=sql_text, dialect="sqlite", source="slm", verified=False)
 
         except Exception as e:
             logger.error(f"SLM generation failed: {e}")
             logger.warning("Falling back to stub mode")
             return self._generate_stub(schema_elements)
+
+    def generate_candidates(
+        self,
+        query: Query,
+        schema_elements: List[SchemaElement],
+        n: int = 1,
+        temperature: Optional[float] = None,
+        feedback: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ) -> List[SQL]:
+        """Generate N candidate SQL queries for execution-guided selection.
+
+        The first candidate is always a deterministic greedy decode (used as the
+        tie-breaker downstream); the remaining ``n-1`` candidates are temperature
+        samples. Optional ``feedback`` is appended for self-correction retries.
+
+        Args:
+            query: Natural language query (evidence already folded into text)
+            schema_elements: Retrieved schema elements (with optional value hints)
+            n: Total number of candidates to return
+            temperature: Sampling temperature for non-greedy candidates
+            feedback: Structured verifier feedback for a repair attempt
+            max_tokens: Optional override for max new tokens
+
+        Returns:
+            List of SQL candidates (greedy first). Falls back to a single stub
+            candidate if the model is unavailable.
+        """
+        max_tokens = max_tokens or self.config.max_tokens
+        temperature = (
+            temperature if temperature is not None
+            else getattr(self.config, "selection_temperature", 0.8)
+        )
+
+        if self.model is None or self.tokenizer is None:
+            logger.warning("SLM not loaded, using stub mode")
+            return [self._generate_stub(schema_elements)]
+
+        try:
+            inputs = self._build_inputs(query, schema_elements, feedback=feedback)
+
+            texts: List[str] = []
+            # Candidate 1: deterministic greedy decode.
+            texts.extend(
+                self._run_generation(
+                    inputs, max_tokens=max_tokens, do_sample=False,
+                    temperature=0.0, num_return_sequences=1,
+                )
+            )
+            # Candidates 2..n: temperature samples (batched in one call).
+            if n > 1 and temperature > 0:
+                texts.extend(
+                    self._run_generation(
+                        inputs, max_tokens=max_tokens, do_sample=True,
+                        temperature=temperature, num_return_sequences=n - 1,
+                    )
+                )
+
+            candidates = []
+            for t in texts:
+                sql_text = self._finalize(t)
+                if sql_text:
+                    candidates.append(
+                        SQL(text=sql_text, dialect="sqlite", source="slm", verified=False)
+                    )
+
+            if not candidates:
+                candidates = [self._generate_stub(schema_elements)]
+            return candidates
+
+        except Exception as e:
+            logger.error(f"SLM candidate generation failed: {e}")
+            logger.warning("Falling back to stub mode")
+            return [self._generate_stub(schema_elements)]
+
+    def _build_inputs(
+        self,
+        query: Query,
+        schema_elements: List[SchemaElement],
+        feedback: Optional[str] = None,
+    ):
+        """Build tokenized model inputs, applying the chat template when available."""
+        user_content = self._format_prompt(query, schema_elements)
+        if feedback:
+            user_content += (
+                f"\n\n-- The previous attempt was rejected by the verifier:\n"
+                f"-- {feedback}\n-- Generate a corrected SQL query.\n-- SQL:"
+            )
+
+        prompt_text = user_content
+        chat_applied = False
+        use_chat = getattr(self.config, "use_chat_template", True)
+        chat_template = getattr(self.tokenizer, "chat_template", None)
+        if use_chat and chat_template:
+            try:
+                prompt_mgr = get_prompt_manager()
+                system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ]
+                prompt_text = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                chat_applied = True
+            except Exception as e:
+                logger.warning(f"Chat template failed ({e}); using raw prompt")
+                prompt_text = user_content
+
+        max_len = getattr(self.config, "max_input_length", 8192)
+        inputs = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_len,
+            # The chat template already injects special tokens; don't double them.
+            add_special_tokens=not chat_applied,
+        )
+
+        if self.device != "auto":
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        else:
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        return inputs
+
+    def _run_generation(
+        self,
+        inputs,
+        max_tokens: int,
+        do_sample: bool,
+        temperature: float,
+        num_return_sequences: int = 1,
+    ) -> List[str]:
+        """Run model.generate and decode only the newly generated tokens."""
+        gen_kwargs = dict(
+            max_new_tokens=max_tokens,
+            do_sample=do_sample,
+            num_return_sequences=num_return_sequences,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        if do_sample:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_p"] = 0.95
+
+        with torch.no_grad():
+            outputs = self.model.generate(**inputs, **gen_kwargs)
+
+        input_length = inputs["input_ids"].shape[1]
+        texts = []
+        for seq in outputs:
+            generated_tokens = seq[input_length:]
+            texts.append(
+                self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            )
+        return texts
+
+    def _finalize(self, generated_text: str) -> str:
+        """Extract SQL from raw model output and apply deterministic fixes."""
+        sql_text = self._extract_sql_from_output(generated_text, "")
+        return finalize_sql(
+            sql_text, enable_cast_fix=getattr(self.config, "enable_cast_fix", True)
+        )
 
     def _generate_stub(self, schema_elements: List[SchemaElement]) -> SQL:
         """Generate stub SQL query (fallback mode).
@@ -253,8 +395,15 @@ class SLMGenerator:
                     col_name = f"`{col_name}`"
                 col_type = col.data_type if col.data_type else "TEXT"
                 schema_str += f"  {col_name} {col_type}"
+                # Build an inline comment from the description and any grounded values.
+                comment_parts = []
                 if col.description:
-                    schema_str += f" -- {col.description}"
+                    comment_parts.append(col.description)
+                if col.example_values:
+                    vals = ", ".join(f"'{v}'" for v in col.example_values[:8])
+                    comment_parts.append(f"examples: {vals}")
+                if comment_parts:
+                    schema_str += " -- " + " | ".join(comment_parts)
                 schema_str += ",\n"
             schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
 

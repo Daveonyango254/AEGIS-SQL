@@ -27,9 +27,18 @@ slm:
   hf_token: ${HF_HUB_TOKEN}  # HuggingFace token from .env
   adapter_path: null  # Optional: Path to LoRA adapter
   max_tokens: 512
-  temperature: 0.0  # Greedy decoding for deterministic SQL
+  temperature: 0.0  # Greedy decoding (used by single-pass generate(); candidates use selection_temperature)
   torch_dtype: float16  # float16/bfloat16/float32
   trust_remote_code: true  # Trust remote code from HuggingFace
+
+  # --- Harness optimization knobs (all default-on, individually toggleable for ablations) ---
+  max_input_length: 8192        # Prompt token budget (raised from 2048 so the question is never truncated)
+  use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
+  num_candidates: 8             # Execution-guided self-consistency: candidates generated per query (1 = single greedy)
+  selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
+  enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
+  enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
+  retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
 
 # ============================================================================
 # Remote LLM Configuration (FLLM)
@@ -99,6 +108,7 @@ verifier:
   execution_check_llm: true  # Enable execution verification for LLM outputs
   sample_size: 100  # Number of rows for execution verification
   timeout_seconds: 5  # Execution timeout per query
+  max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
 
 # ============================================================================
 # Evaluation Configuration
