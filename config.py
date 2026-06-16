@@ -84,6 +84,20 @@ class LLMConfig(BaseModel):
     max_retries: int = Field(default=3, description="Maximum number of retries on failure")
     retry_delay: float = Field(default=1.0, description="Initial delay between retries (exponential backoff)")
 
+    # --- Harness optimization knobs (mirror the local path; toggleable for ablation) ---
+    num_candidates: int = Field(
+        default=5,
+        description="Remote candidates for execution-guided selection (1 = single call). Each costs an API request.",
+    )
+    selection_temperature: float = Field(
+        default=0.7,
+        description="Sampling temperature for the non-greedy remote candidates",
+    )
+    enable_cast_fix: bool = Field(
+        default=True,
+        description="Wrap division numerators in CAST(... AS REAL) on remote output too",
+    )
+
 
 class SensitivityPolicyConfig(BaseModel):
     """Sensitivity policy configuration."""
@@ -105,6 +119,11 @@ class PrivacyConfig(BaseModel):
     )
     abstraction_enabled: bool = Field(
         default=True, description="Enable DP abstraction for remote queries"
+    )
+    value_aware_abstraction: bool = Field(
+        default=True,
+        description="Only abstract value-like tokens (proper nouns/literals), never generic "
+        "schema-vocabulary words like 'name'/'price'. Prevents over-abstraction that destroys remote accuracy.",
     )
     reconstruction_enabled: bool = Field(
         default=True, description="Enable reconstruction after remote generation (must match abstraction_enabled)"
@@ -197,6 +216,11 @@ class VerifierConfig(BaseModel):
     max_repair_attempts: int = Field(
         default=1,
         description="Max self-correction regenerations when verification fails (0 disables the repair loop)",
+    )
+    repair_on_empty: bool = Field(
+        default=True,
+        description="Treat an executed-but-empty result as a soft execution failure "
+        "to trigger one value-aware repair (targets literal-mismatch errors).",
     )
 
 

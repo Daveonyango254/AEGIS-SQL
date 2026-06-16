@@ -119,6 +119,11 @@ class FeedbackGenerator:
         error_lower = error_message.lower()
 
         # Identify error category
+        if "empty" in error_lower or "0 row" in error_lower or "no rows" in error_lower:
+            return """1. Empty Result: The query ran successfully but matched no rows.
+   Location: WHERE clause literal value(s)
+   Suggestion: A string literal in a WHERE clause likely does not match the value stored in the database. Use one of the exact values shown in the schema 'examples:' comments (e.g. 'Continuation School' instead of 'Continuation'); check spelling, casing, and spacing. Also confirm you are filtering the correct column."""
+
         if "divide" in error_lower or "division" in error_lower:
             suggestion = "Add a WHERE clause to filter out NULL or zero values, or use CASE to handle division safely."
         elif "type" in error_lower or "datatype" in error_lower:

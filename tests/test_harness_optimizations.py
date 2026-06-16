@@ -171,12 +171,42 @@ def test_candidate_selection(db_path):
     check("cast-fixed ratio computes 0.25 not 0", abs(val - 0.25) < 1e-9, f"got {val}")
 
 
+def test_empty_repair(db_path):
+    print("\n[4] candidate_selector empty-result -> repair decision")
+
+    # All candidates use the wrong literal -> every result set is empty (0 rows).
+    wrong = "SELECT id FROM frpm WHERE EdOption = 'Continuation'"
+    info_empty = candidate_selector.select_best([wrong, wrong], db_path, timeout=5)
+    check("empty result detected (exec_ok, is_empty)",
+          info_empty["exec_ok"] is True and info_empty["is_empty"] is True, str(info_empty))
+
+    # A correct candidate returns rows -> not empty.
+    right = "SELECT id FROM frpm WHERE EdOption = 'Continuation School'"
+    info_rows = candidate_selector.select_best([right, right], db_path, timeout=5)
+    check("non-empty result detected", info_rows["is_empty"] is False, str(info_rows))
+
+    f = candidate_selector.flag_empty_for_repair
+    # Empty + budget remaining (gen 1 <= max 1) -> repair.
+    check("empty + budget -> repair",
+          f(info_empty, repair_on_empty=True, generations=1, max_repairs=1) is True)
+    # Empty + budget exhausted (gen 2 > max 1) -> accept (no repair).
+    check("empty + exhausted -> no repair",
+          f(info_empty, repair_on_empty=True, generations=2, max_repairs=1) is False)
+    # Non-empty -> never repair.
+    check("non-empty -> no repair",
+          f(info_rows, repair_on_empty=True, generations=1, max_repairs=1) is False)
+    # Flag disabled -> never repair even when empty.
+    check("flag off -> no repair",
+          f(info_empty, repair_on_empty=False, generations=1, max_repairs=1) is False)
+
+
 if __name__ == "__main__":
     db = build_db()
     try:
         test_cast_fix()
         test_value_grounding(db)
         test_candidate_selection(db)
+        test_empty_repair(db)
     finally:
         os.remove(db)
 
