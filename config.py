@@ -217,6 +217,11 @@ class VerifierConfig(BaseModel):
         default=1,
         description="Max self-correction regenerations when verification fails (0 disables the repair loop)",
     )
+    repair_on_empty: bool = Field(
+        default=True,
+        description="Treat an executed-but-empty result as a soft execution failure "
+        "to trigger one value-aware repair (targets literal-mismatch errors).",
+    )
 
 
 class EvaluationConfig(BaseModel):

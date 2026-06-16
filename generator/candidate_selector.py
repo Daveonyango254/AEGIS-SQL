@@ -190,3 +190,36 @@ def select_best(
         "num_nonempty": 0,
         "num_agree": 0,
     }
+
+
+def flag_empty_for_repair(
+    info: Dict,
+    repair_on_empty: bool,
+    generations: int,
+    max_repairs: int,
+) -> bool:
+    """Decide whether an executed-but-empty result should trigger a repair.
+
+    An empty result set is the signature of the dominant literal-mismatch
+    failure (e.g. ``= 'Continuation'`` instead of ``= 'Continuation School'``),
+    so when every candidate returns no rows we want one value-aware retry.
+
+    The ``generations <= max_repairs`` guard ensures the final accepted result
+    is never flagged as failed once the repair budget is exhausted.
+
+    Args:
+        info: Result dict from :func:`select_best`.
+        repair_on_empty: Whether empty-result repair is enabled.
+        generations: Number of FSLM generations so far (initial counts as 1).
+        max_repairs: Configured ``verifier.max_repair_attempts``.
+
+    Returns:
+        True iff the chosen candidate executed, returned no rows, and a repair
+        attempt is still available.
+    """
+    return bool(
+        repair_on_empty
+        and info.get("exec_ok")
+        and info.get("is_empty")
+        and generations <= max_repairs
+    )

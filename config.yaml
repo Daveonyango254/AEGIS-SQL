@@ -110,6 +110,7 @@ verifier:
   sample_size: 100  # Number of rows for execution verification
   timeout_seconds: 5  # Execution timeout per query
   max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
+  repair_on_empty: true  # Treat an executed-but-empty result as a soft fail to trigger one value-aware repair
 
 # ============================================================================
 # Evaluation Configuration

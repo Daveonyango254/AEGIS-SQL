@@ -618,6 +618,21 @@ def verification_node(state: AEGISState) -> AEGISState:
             if not execution_valid:
                 status = VerificationStatus.EXECUTION_FAIL
                 error_message = exec_info.get("error")
+            else:
+                # An executed-but-empty result is the signature of a literal
+                # mismatch; flag it as a soft failure to trigger one value-aware
+                # repair (bounded so the final accepted result is never failed).
+                from generator.candidate_selector import flag_empty_for_repair
+
+                if flag_empty_for_repair(
+                    exec_info,
+                    repair_on_empty=getattr(vcfg, "repair_on_empty", True) if vcfg else True,
+                    generations=state.get("generation_count", 1),
+                    max_repairs=vcfg.max_repair_attempts if vcfg else 1,
+                ):
+                    execution_valid = False
+                    status = VerificationStatus.EXECUTION_FAIL
+                    error_message = "Query executed but returned an empty result set (0 rows)."
         else:
             try:
                 ev = ExecutionVerifier(
