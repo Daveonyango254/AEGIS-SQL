@@ -79,9 +79,13 @@ def main():
     output_dir = Path("evaluation/output") / args.output_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Setup logging
+    # Setup logging: send the full DEBUG/INFO trace to the file only, and keep
+    # the console limited to warnings/errors so the tqdm progress bar (below)
+    # stays clean instead of being buried under per-node INFO logs.
     log_file = output_dir / "evaluation.log"
+    logger.remove()  # drop loguru's default stderr sink that floods the console
     logger.add(log_file, format="{time} {level} {message}", level="DEBUG")
+    logger.add(sys.stderr, level="WARNING")
 
     logger.info("=" * 80)
     logger.info("AEGIS-SQL BIRD Evaluation - Prediction Generation")
@@ -177,8 +181,11 @@ def main():
                 aegis_query = loader.query_to_aegis_query(query_dict)
                 initial_state["query"] = aegis_query
 
-                # Run workflow
-                result = graph.invoke(initial_state)
+                # Run workflow. recursion_limit is a hard backstop: the repair
+                # loop is already bounded by verifier.max_repair_attempts, but
+                # this guarantees a pathological state raises instead of hanging
+                # the full 1534-query run (caught by the except below).
+                result = graph.invoke(initial_state, config={"recursion_limit": 12})
 
                 # Extract results
                 sql = result.get("sql")
