@@ -180,37 +180,95 @@ class DPAbstractor:
             List of (token, start_pos, end_pos) for sensitive tokens
         """
         sensitive_tokens = []
+        value_aware = getattr(self.config, "value_aware_abstraction", False)
 
         # Simple word tokenization (TODO: use proper NER)
         words = query.text.split()
         position = 0
 
-        for word in words:
-            # Check if word is sensitive
-            if self.policy.is_sensitive(word):
+        for index, word in enumerate(words):
+            # Value-aware mode: abstract only value-like tokens (proper nouns /
+            # literals), never generic schema-vocabulary words like 'name'/'price'.
+            # Legacy mode: abstract any keyword-matched sensitive token.
+            if value_aware:
+                should_abstract = self._is_value_like_token(word, index)
+            else:
+                should_abstract = self.policy.is_sensitive(word)
+
+            if should_abstract:
                 start = query.text.find(word, position)
                 end = start + len(word)
                 sensitive_tokens.append((word, start, end))
                 position = end
 
-        # Check schema elements for sensitive names
-        for element in schema_elements:
-            if self.policy.is_sensitive(element.name):
-                # Find occurrences in query
-                start = 0
-                while True:
-                    start = query.text.find(element.name, start)
-                    if start == -1:
-                        break
-                    end = start + len(element.name)
-                    sensitive_tokens.append((element.name, start, end))
-                    start = end
+        # Check schema elements for sensitive names. Schema element names are
+        # identifiers the remote LLM must map to columns, not sensitive *values*,
+        # so value-aware mode skips them to avoid corrupting column references.
+        if not value_aware:
+            for element in schema_elements:
+                if self.policy.is_sensitive(element.name):
+                    # Find occurrences in query
+                    start = 0
+                    while True:
+                        start = query.text.find(element.name, start)
+                        if start == -1:
+                            break
+                        end = start + len(element.name)
+                        sensitive_tokens.append((element.name, start, end))
+                        start = end
 
         # Remove duplicates and sort by position
         sensitive_tokens = list(set(sensitive_tokens))
         sensitive_tokens.sort(key=lambda x: x[1])
 
         return sensitive_tokens
+
+    # Question/function words that are capitalized only because they start a
+    # sentence — never treat these as proper-noun values even mid-sentence.
+    _NON_VALUE_WORDS = frozenset(
+        {
+            "what", "which", "who", "whom", "whose", "where", "when", "why",
+            "how", "list", "show", "give", "find", "name", "tell", "count",
+            "the", "a", "an", "of", "in", "on", "for", "and", "or", "is",
+            "are", "was", "were", "do", "does", "did", "please", "all",
+        }
+    )
+
+    def _is_value_like_token(self, raw_word: str, index: int) -> bool:
+        """Decide whether a query token is a value-like literal worth abstracting.
+
+        Value-like tokens are quoted literals, tokens containing digits (ids,
+        zips, years, codes), and mid-sentence proper nouns. Lowercase common
+        words — i.e. schema vocabulary such as 'name'/'price' — are not.
+
+        Args:
+            raw_word: Whitespace-delimited token, possibly with attached
+                punctuation/quotes.
+            index: Position of the token in the question (0 == sentence start).
+
+        Returns:
+            True if the token should be abstracted under value-aware mode.
+        """
+        # Quoted literal, e.g. 'Continuation School' / "Adams" — check before
+        # stripping punctuation so the leading quote is still visible.
+        if raw_word and raw_word[0] in "\"'":
+            return True
+
+        stripped = raw_word.strip("\"'.,;:!?()[]{}")
+        if not stripped:
+            return False
+
+        # Codes / numeric literals (zips, years, ids, alphanumeric codes).
+        if any(char.isdigit() for char in stripped):
+            return True
+
+        # Proper noun: capitalized and not a sentence-initial question/function
+        # word. Sentence-initial tokens (index == 0) are capitalized by grammar,
+        # so they are not treated as values.
+        if index > 0 and stripped[0].isupper() and stripped.lower() not in self._NON_VALUE_WORDS:
+            return True
+
+        return False
 
     def _sample_placeholder(
         self, token: str, token_embedding: np.ndarray

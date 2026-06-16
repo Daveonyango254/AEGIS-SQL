@@ -59,6 +59,7 @@ llm:
 privacy:
   epsilon: 1.0  # ε privacy budget (0 = disable abstraction)
   abstraction_enabled: true  # Enable DP abstraction for remote queries
+  value_aware_abstraction: true  # Abstract only value-like tokens (proper nouns/literals), never schema words like 'name'/'price'
   reconstruction_enabled: true  # Enable reconstruction (must match abstraction_enabled)
   placeholder_vocab_size: 100  # Number of semantic placeholders in V_abs
 

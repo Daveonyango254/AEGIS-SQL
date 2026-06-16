@@ -106,6 +106,11 @@ class PrivacyConfig(BaseModel):
     abstraction_enabled: bool = Field(
         default=True, description="Enable DP abstraction for remote queries"
     )
+    value_aware_abstraction: bool = Field(
+        default=True,
+        description="Only abstract value-like tokens (proper nouns/literals), never generic "
+        "schema-vocabulary words like 'name'/'price'. Prevents over-abstraction that destroys remote accuracy.",
+    )
     reconstruction_enabled: bool = Field(
         default=True, description="Enable reconstruction after remote generation (must match abstraction_enabled)"
     )
