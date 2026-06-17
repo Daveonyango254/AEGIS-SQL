@@ -34,7 +34,7 @@ slm:
   # --- Harness optimization knobs (all default-on, individually toggleable for ablations) ---
   max_input_length: 8192        # Prompt token budget (raised from 2048 so the question is never truncated)
   use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
-  num_candidates: 8             # Execution-guided self-consistency: candidates generated per query (1 = single greedy)
+  num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
   selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)

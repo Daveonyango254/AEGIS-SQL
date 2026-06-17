@@ -51,7 +51,7 @@ class SLMConfig(BaseModel):
         description="Apply the tokenizer chat template (system+user) for instruct models",
     )
     num_candidates: int = Field(
-        default=8,
+        default=3,
         description="Number of candidates for execution-guided self-consistency (1 = single greedy decode)",
     )
     selection_temperature: float = Field(
@@ -83,20 +83,9 @@ class LLMConfig(BaseModel):
     timeout: int = Field(default=30, description="Request timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum number of retries on failure")
     retry_delay: float = Field(default=1.0, description="Initial delay between retries (exponential backoff)")
-
-    # --- Harness optimization knobs (mirror the local path; toggleable for ablation) ---
-    num_candidates: int = Field(
-        default=5,
-        description="Remote candidates for execution-guided selection (1 = single call). Each costs an API request.",
-    )
-    selection_temperature: float = Field(
-        default=0.7,
-        description="Sampling temperature for the non-greedy remote candidates",
-    )
-    enable_cast_fix: bool = Field(
-        default=True,
-        description="Wrap division numerators in CAST(... AS REAL) on remote output too",
-    )
+    # NOTE: the remote path makes exactly one API call per query (single
+    # candidate); execution-guided multi-candidate selection is local-SLM-only,
+    # so the USD cost is one request per remote query.
 
 
 class SensitivityPolicyConfig(BaseModel):
