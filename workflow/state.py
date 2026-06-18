@@ -91,6 +91,12 @@ class AEGISState(TypedDict, total=False):
     verification_result: Optional[VerificationResult]
     verification_attempts: int
 
+    # Self-correction loop (must be declared so LangGraph persists them as
+    # channels across super-steps; otherwise the repair counter resets every
+    # iteration and should_repair never terminates).
+    generation_count: int  # Number of FSLM generations so far (initial + repairs)
+    _candidate_exec: Optional[Dict]  # Execution-guided selection diagnostics (exec_ok/is_empty/...)
+
     # Metrics
     cost_usd: float
     latency_ms: float

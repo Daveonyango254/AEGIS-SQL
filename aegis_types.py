@@ -207,6 +207,7 @@ class SQL:
     source: str = "slm"  # "slm" | "llm"
     verified: bool = False
     verification_result: Optional["VerificationResult"] = None
+    token_usage: int = 0  # Total LLM tokens consumed (remote path; for cost accounting)
 
 
 @dataclass

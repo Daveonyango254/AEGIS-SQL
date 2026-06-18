@@ -31,6 +31,13 @@ _DEFAULT_SLM_SYSTEM_PROMPT = (
     "integer division. Return only the SQL query."
 )
 
+# Minimal native instruction for SQL-specialist models (XiYanSQL / CscSQL) that
+# expect an M-Schema prompt and were trained without few-shot scaffolding.
+_MSCHEMA_SYSTEM_PROMPT = (
+    "You are a SQLite expert. Read the database schema (M-Schema format) and the "
+    "question, then output a single valid SQLite query that answers it."
+)
+
 
 class SLMGenerator:
     """Local SLM generator for SQL (FSLM).
@@ -117,6 +124,7 @@ class SLMGenerator:
         schema_elements: List[SchemaElement],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        schema=None,
     ) -> SQL:
         """Generate SQL from natural language query using local SLM.
 
@@ -141,7 +149,7 @@ class SLMGenerator:
         logger.debug(f"Generating SQL with FSLM: {self.config.model}")
 
         try:
-            inputs = self._build_inputs(query, schema_elements)
+            inputs = self._build_inputs(query, schema_elements, schema=schema)
             texts = self._run_generation(
                 inputs,
                 max_tokens=max_tokens,
@@ -169,6 +177,7 @@ class SLMGenerator:
         temperature: Optional[float] = None,
         feedback: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        schema=None,
     ) -> List[SQL]:
         """Generate N candidate SQL queries for execution-guided selection.
 
@@ -199,7 +208,7 @@ class SLMGenerator:
             return [self._generate_stub(schema_elements)]
 
         try:
-            inputs = self._build_inputs(query, schema_elements, feedback=feedback)
+            inputs = self._build_inputs(query, schema_elements, feedback=feedback, schema=schema)
 
             texts: List[str] = []
             # Candidate 1: deterministic greedy decode.
@@ -240,9 +249,10 @@ class SLMGenerator:
         query: Query,
         schema_elements: List[SchemaElement],
         feedback: Optional[str] = None,
+        schema=None,
     ):
         """Build tokenized model inputs, applying the chat template when available."""
-        user_content = self._format_prompt(query, schema_elements)
+        user_content = self._format_prompt(query, schema_elements, schema=schema)
         if feedback:
             user_content += (
                 f"\n\n-- The previous attempt was rejected by the verifier:\n"
@@ -255,8 +265,13 @@ class SLMGenerator:
         chat_template = getattr(self.tokenizer, "chat_template", None)
         if use_chat and chat_template:
             try:
-                prompt_mgr = get_prompt_manager()
-                system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
+                if getattr(self.config, "prompt_format", "ddl") == "m_schema":
+                    # Specialist models want a minimal native instruction, not
+                    # the verbose base-model system prompt.
+                    system_prompt = _MSCHEMA_SYSTEM_PROMPT
+                else:
+                    prompt_mgr = get_prompt_manager()
+                    system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -355,6 +370,29 @@ class SLMGenerator:
         )
 
     def _format_prompt(
+        self, query: Query, schema_elements: List[SchemaElement], schema=None
+    ) -> str:
+        """Dispatch prompt construction by configured format.
+
+        'm_schema' → native M-Schema for SQL-specialist models (default);
+        'ddl' → CREATE TABLE + few-shot for weak base models.
+        """
+        if getattr(self.config, "prompt_format", "ddl") == "m_schema":
+            from prompts.m_schema import build_m_schema_prompt
+
+            foreign_keys = getattr(schema, "foreign_keys", None)
+            primary_keys = getattr(schema, "primary_keys", None)
+            return build_m_schema_prompt(
+                db_id=query.database_id,
+                schema_elements=schema_elements,
+                question=query.text,
+                evidence=getattr(query, "evidence", "") or "",
+                foreign_keys=foreign_keys,
+                primary_keys=primary_keys,
+            )
+        return self._format_prompt_ddl(query, schema_elements)
+
+    def _format_prompt_ddl(
         self, query: Query, schema_elements: List[SchemaElement]
     ) -> str:
         """Format prompt for SLM generation with CREATE TABLE syntax, FK hints, and examples.

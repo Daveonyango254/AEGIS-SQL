@@ -50,6 +50,20 @@ class SLMConfig(BaseModel):
         default=True,
         description="Apply the tokenizer chat template (system+user) for instruct models",
     )
+    prompt_format: str = Field(
+        default="m_schema",
+        description="Local prompt schema serialization: 'm_schema' (native format for "
+        "XiYanSQL/CscSQL specialists) or 'ddl' (CREATE TABLE + few-shot, for weak base models)",
+    )
+    full_schema: bool = Field(
+        default=True,
+        description="Feed the complete DB schema (skip RAG retrieval) when it fits the "
+        "token budget; falls back to top_k retrieval for very large schemas",
+    )
+    full_schema_max_columns: int = Field(
+        default=160,
+        description="Max total columns to inline as full schema before falling back to RAG retrieval",
+    )
     num_candidates: int = Field(
         default=3,
         description="Number of candidates for execution-guided self-consistency (1 = single greedy decode)",

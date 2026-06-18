@@ -269,12 +269,23 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
     query = state["query"]
     cfg = cache._config
     top_k = cfg.slm.retrieval_top_k if cfg else 80
-    schema_elements = retriever.retrieve(
-        query,
-        top_k=top_k,  # Raised so needed columns are not dropped on larger schemas
-        expand_foreign_keys=True,  # Enable FK expansion to include related tables
-        max_expanded_tables=3  # Add up to 3 FK-related tables
-    )
+
+    # Full-schema mode: SQL-specialist models link best against the complete
+    # schema (BIRD-dev DBs are small). Skip RAG when the DB fits the budget;
+    # fall back to top_k retrieval for very large schemas.
+    full_schema = bool(cfg and getattr(cfg.slm, "full_schema", False))
+    max_cols = getattr(cfg.slm, "full_schema_max_columns", 160) if cfg else 160
+    all_columns = [c for c in schema.columns if "." in c.name]
+    if full_schema and 0 < len(all_columns) <= max_cols:
+        schema_elements = list(all_columns)
+        logger.info(f"FULL_SCHEMA: using all {len(schema_elements)} columns (RAG skipped)")
+    else:
+        schema_elements = retriever.retrieve(
+            query,
+            top_k=top_k,  # Raised so needed columns are not dropped on larger schemas
+            expand_foreign_keys=True,  # Enable FK expansion to include related tables
+            max_expanded_tables=3  # Add up to 3 FK-related tables
+        )
 
     # Value grounding: attach sampled DB values / value-linking hints so the model
     # uses real literals (e.g. 'Continuation School', not 'Continuation').
@@ -414,13 +425,14 @@ def fslm_generation_node(state: AEGISState) -> AEGISState:
     n = cfg.slm.num_candidates if cfg else 8
     sel_temp = cfg.slm.selection_temperature if cfg else 0.8
 
+    schema = state.get("schema")
     candidates = generator.generate_candidates(
-        query, schema_elements, n=n, temperature=sel_temp, feedback=feedback
+        query, schema_elements, n=n, temperature=sel_temp, feedback=feedback, schema=schema
     )
     candidate_texts = [c.text for c in candidates if c.text]
 
     state.pop("_candidate_exec", None)
-    sql = candidates[0] if candidates else generator.generate(query, schema_elements)
+    sql = candidates[0] if candidates else generator.generate(query, schema_elements, schema=schema)
 
     # Execution-guided selection: run candidates against the real DB and pick by
     # non-empty + majority-vote agreement on the result set.
@@ -442,6 +454,13 @@ def fslm_generation_node(state: AEGISState) -> AEGISState:
 
     state["sql"] = sql
     state["generation_source"] = "slm"
+
+    # Local path cost: fixed per-inference compute cost.
+    if cfg:
+        from workflow.costing import compute_cost
+        state["cost_usd"] = compute_cost(
+            "slm", 0, cfg.cost.remote_token_cost, cfg.cost.local_compute_cost
+        )
 
     logger.info(f"GENERATION_COMPLETE (FSLM): {sql.text[:80]}...")
     logger.info(f"GENERATED_SQL_FSLM: {sql.text}")  # Log full SQL for observability
@@ -486,6 +505,17 @@ def fllm_generation_node(state: AEGISState) -> AEGISState:
 
     state["sql"] = sql
     state["generation_source"] = "llm"
+
+    # Remote path cost: billed by actual token usage (captured from the API).
+    cfg = cache._config
+    if cfg:
+        from workflow.costing import compute_cost
+        state["cost_usd"] = compute_cost(
+            "llm",
+            getattr(sql, "token_usage", 0),
+            cfg.cost.remote_token_cost,
+            cfg.cost.local_compute_cost,
+        )
 
     logger.info(f"GENERATION_COMPLETE (FLLM): {sql.text[:80]}...")
     logger.info(f"GENERATED_SQL_FLLM (with placeholders): {sql.text}")  # Log SQL with placeholders
