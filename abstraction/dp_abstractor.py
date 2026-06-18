@@ -196,10 +196,16 @@ class DPAbstractor:
                 should_abstract = self.policy.is_sensitive(word)
 
             if should_abstract:
-                start = query.text.find(word, position)
-                end = start + len(word)
-                sensitive_tokens.append((word, start, end))
-                position = end
+                raw_start = query.text.find(word, position)
+                raw_end = raw_start + len(word)
+                # Abstract only the core value, leaving surrounding quotes and
+                # punctuation in place. Otherwise tokens like "Lakeport?" or
+                # "'French'" get reconstructed verbatim into the SQL literal,
+                # producing 'Lakeport?' or doubled quotes ''French''.
+                core, core_start, core_end = self._core_span(word, raw_start)
+                if core:
+                    sensitive_tokens.append((core, core_start, core_end))
+                position = raw_end
 
         # Check schema elements for sensitive names. Schema element names are
         # identifiers the remote LLM must map to columns, not sensitive *values*,
@@ -222,6 +228,29 @@ class DPAbstractor:
         sensitive_tokens.sort(key=lambda x: x[1])
 
         return sensitive_tokens
+
+    # Surrounding quotes/punctuation stripped before abstraction so only the
+    # value itself is substituted (and later reconstructed).
+    _STRIP_CHARS = "\"'`.,;:!?()[]{}<>"
+
+    def _core_span(self, word: str, raw_start: int) -> Tuple[str, int, int]:
+        """Return the punctuation/quote-stripped core of a token and its span.
+
+        Args:
+            word: Whitespace-delimited token, possibly with attached quotes or
+                punctuation (e.g. ``"Lakeport?"`` or ``"'French'"``).
+            raw_start: Offset of ``word`` within the original query text.
+
+        Returns:
+            ``(core, core_start, core_end)`` where ``core`` is ``word`` with
+            leading/trailing :data:`_STRIP_CHARS` removed and the offsets bound
+            only the core within the original text. ``core`` is empty if the
+            token is entirely punctuation.
+        """
+        lead = len(word) - len(word.lstrip(self._STRIP_CHARS))
+        trail = len(word) - len(word.rstrip(self._STRIP_CHARS))
+        core = word[lead:len(word) - trail]
+        return core, raw_start + lead, raw_start + len(word) - trail
 
     # Question/function words that are capitalized only because they start a
     # sentence — never treat these as proper-noun values even mid-sentence.

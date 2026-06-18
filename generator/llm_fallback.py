@@ -104,23 +104,25 @@ class LLMFallback:
 
         # Call LLM API based on provider
         if self.provider == "openai":
-            sql_text = self._call_openai(prompt, max_tokens, temperature)
+            sql_text, token_usage = self._call_openai(prompt, max_tokens, temperature)
         elif self.provider == "anthropic":
-            sql_text = self._call_anthropic(prompt, max_tokens, temperature)
+            sql_text, token_usage = self._call_anthropic(prompt, max_tokens, temperature)
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
-        # Return SQL (still has placeholders - needs reconstruction)
+        # Return SQL (still has placeholders - needs reconstruction). token_usage
+        # is carried on the returned object (thread-safe) for cost accounting.
         return SQL(
             text=sql_text,
             dialect="sqlite",  # TODO: Get from config
             source="fllm",
             verified=False,
+            token_usage=token_usage,
         )
 
     def _call_openai(
         self, prompt: str, max_tokens: int, temperature: float
-    ) -> str:
+    ) -> tuple:
         """Call OpenAI API with retry logic.
 
         Args:
@@ -129,7 +131,7 @@ class LLMFallback:
             temperature: Temperature
 
         Returns:
-            Generated SQL text
+            (generated SQL text, total tokens consumed)
 
         Calls OpenAI API with exponential backoff retry logic.
         """
@@ -154,7 +156,9 @@ class LLMFallback:
                     timeout=self.config.timeout,
                 )
                 sql_text = response.choices[0].message.content.strip()
-                return self._extract_sql_from_output(sql_text)
+                usage = getattr(response, "usage", None)
+                total_tokens = getattr(usage, "total_tokens", 0) or 0
+                return self._extract_sql_from_output(sql_text), total_tokens
 
             except (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError) as e:
                 last_error = e
@@ -176,7 +180,7 @@ class LLMFallback:
 
     def _call_anthropic(
         self, prompt: str, max_tokens: int, temperature: float
-    ) -> str:
+    ) -> tuple:
         """Call Anthropic API with retry logic.
 
         Args:
@@ -185,7 +189,7 @@ class LLMFallback:
             temperature: Temperature
 
         Returns:
-            Generated SQL text
+            (generated SQL text, total tokens consumed)
 
         Calls Anthropic API with exponential backoff retry logic.
         """
@@ -209,7 +213,11 @@ class LLMFallback:
                     timeout=self.config.timeout,
                 )
                 sql_text = response.content[0].text.strip()
-                return self._extract_sql_from_output(sql_text)
+                usage = getattr(response, "usage", None)
+                total_tokens = (
+                    getattr(usage, "input_tokens", 0) or 0
+                ) + (getattr(usage, "output_tokens", 0) or 0)
+                return self._extract_sql_from_output(sql_text), total_tokens
 
             except (anthropic.RateLimitError, anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
                 last_error = e

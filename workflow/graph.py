@@ -443,6 +443,13 @@ def fslm_generation_node(state: AEGISState) -> AEGISState:
     state["sql"] = sql
     state["generation_source"] = "slm"
 
+    # Local path cost: fixed per-inference compute cost.
+    if cfg:
+        from workflow.costing import compute_cost
+        state["cost_usd"] = compute_cost(
+            "slm", 0, cfg.cost.remote_token_cost, cfg.cost.local_compute_cost
+        )
+
     logger.info(f"GENERATION_COMPLETE (FSLM): {sql.text[:80]}...")
     logger.info(f"GENERATED_SQL_FSLM: {sql.text}")  # Log full SQL for observability
 
@@ -486,6 +493,17 @@ def fllm_generation_node(state: AEGISState) -> AEGISState:
 
     state["sql"] = sql
     state["generation_source"] = "llm"
+
+    # Remote path cost: billed by actual token usage (captured from the API).
+    cfg = cache._config
+    if cfg:
+        from workflow.costing import compute_cost
+        state["cost_usd"] = compute_cost(
+            "llm",
+            getattr(sql, "token_usage", 0),
+            cfg.cost.remote_token_cost,
+            cfg.cost.local_compute_cost,
+        )
 
     logger.info(f"GENERATION_COMPLETE (FLLM): {sql.text[:80]}...")
     logger.info(f"GENERATED_SQL_FLLM (with placeholders): {sql.text}")  # Log SQL with placeholders

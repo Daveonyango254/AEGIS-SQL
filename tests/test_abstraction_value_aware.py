@@ -9,7 +9,7 @@ Run with: python -m pytest tests/test_abstraction_value_aware.py -v
 """
 
 from config import PrivacyConfig
-from aegis_types import Language, Query
+from aegis_types import Language, Query, SQL
 from abstraction.dp_abstractor import DPAbstractor
 from abstraction.placeholder_vocab import PlaceholderVocabulary
 from abstraction.reconstruction import ReconstructionModule
@@ -72,10 +72,50 @@ def test_legacy_mode_abstracts_keyword_schema_words():
     """With the flag off, legacy keyword gating still abstracts 'name'/'price'."""
     abstracted, _ = _abstract(value_aware=False)
     originals = set(abstracted.placeholder_map.values())
-    # Whitespace tokenization keeps attached punctuation (e.g. 'price?'), so
-    # match on substring: legacy keyword gating abstracts these schema words.
     assert any("name" in tok for tok in originals)
     assert any("price" in tok for tok in originals)
+
+
+# --------------------------------------------------------------------------- #
+# Literal-corruption fix: only the core value is abstracted, so reconstruction
+# never re-injects quotes/punctuation into the SQL literal.
+# --------------------------------------------------------------------------- #
+def _abstract_text(text: str, value_aware: bool = True):
+    abstractor = _make_abstractor(value_aware)
+    query = Query(text=text, language=Language.ENGLISH, database_id="db")
+    return abstractor.abstract(query, schema_elements=[])
+
+
+def test_core_span_strips_trailing_punctuation():
+    """A trailing '?' must not be carried into the abstracted/real token."""
+    abstracted, _ = _abstract_text("How many schools are in Lakeport?")
+    originals = set(abstracted.placeholder_map.values())
+    assert "Lakeport" in originals
+    assert all("?" not in tok for tok in originals)
+
+
+def test_core_span_strips_surrounding_quotes():
+    """A quoted token like 'French' must abstract to the bare core 'French'."""
+    abstracted, _ = _abstract_text("How many cards by artist 'French' exist")
+    originals = set(abstracted.placeholder_map.values())
+    assert "French" in originals
+    assert all(not (tok.startswith("'") or tok.endswith("'")) for tok in originals)
+
+
+def test_reconstruction_produces_clean_sql_literal():
+    """Reconstructing a quoted placeholder yields 'Lakeport', not ''Lakeport'' or 'Lakeport?'."""
+    abstracted, recon_map = _abstract_text("How many schools are in Lakeport?")
+    placeholder = next(p for p, v in recon_map.placeholder_to_real.items() if v == "Lakeport")
+
+    # Mirror how the remote LLM would emit the literal: placeholder inside quotes.
+    sql = SQL(text=f"SELECT COUNT(*) FROM schools WHERE city = '{placeholder}'", dialect="sqlite")
+    module = ReconstructionModule()
+    module.register_map("q", recon_map)
+    out = module.reconstruct(sql, "q").text
+
+    assert "'Lakeport'" in out
+    assert "''" not in out          # no doubled quotes
+    assert "Lakeport?" not in out   # no stray punctuation
 
 
 if __name__ == "__main__":
@@ -83,4 +123,7 @@ if __name__ == "__main__":
     test_value_aware_abstracts_proper_noun_values()
     test_value_aware_reconstruction_round_trips()
     test_legacy_mode_abstracts_keyword_schema_words()
+    test_core_span_strips_trailing_punctuation()
+    test_core_span_strips_surrounding_quotes()
+    test_reconstruction_produces_clean_sql_literal()
     print("All value-aware abstraction tests passed.")
