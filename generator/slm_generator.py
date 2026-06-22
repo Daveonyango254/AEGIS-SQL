@@ -31,13 +31,6 @@ _DEFAULT_SLM_SYSTEM_PROMPT = (
     "integer division. Return only the SQL query."
 )
 
-# Minimal native instruction for SQL-specialist models (XiYanSQL / CscSQL) that
-# expect an M-Schema prompt and were trained without few-shot scaffolding.
-_MSCHEMA_SYSTEM_PROMPT = (
-    "You are a SQLite expert. Read the database schema (M-Schema format) and the "
-    "question, then output a single valid SQLite query that answers it."
-)
-
 
 class SLMGenerator:
     """Local SLM generator for SQL (FSLM).
@@ -266,16 +259,16 @@ class SLMGenerator:
         if use_chat and chat_template:
             try:
                 if getattr(self.config, "prompt_format", "ddl") == "m_schema":
-                    # Specialist models want a minimal native instruction, not
-                    # the verbose base-model system prompt.
-                    system_prompt = _MSCHEMA_SYSTEM_PROMPT
+                    # Native specialist usage: a single user turn carrying the
+                    # full template (no separate system prompt), matching training.
+                    messages = [{"role": "user", "content": user_content}]
                 else:
                     prompt_mgr = get_prompt_manager()
                     system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ]
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ]
                 prompt_text = self.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
@@ -485,6 +478,18 @@ class SLMGenerator:
             Extracted SQL query string
         """
         sql = output.strip()
+
+        # The native m_schema prompt ends with ```sql, so the model completes the
+        # query and then emits a closing ```. Strip any surrounding code fences
+        # (leading ```sql/``` and everything after a closing ```), otherwise the
+        # trailing fence leaks into the SQL and fails grammar verification.
+        if sql.startswith("```sql"):
+            sql = sql[6:]
+        elif sql.startswith("```"):
+            sql = sql[3:]
+        if "```" in sql:
+            sql = sql.split("```", 1)[0]
+        sql = sql.strip()
 
         # Priority 1: Extract from ```sql ... ``` code blocks
         if "```sql" in sql:

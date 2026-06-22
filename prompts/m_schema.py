@@ -1,12 +1,12 @@
-"""M-Schema prompt construction for SQL-specialist models (XiYanSQL / CscSQL).
+"""M-Schema prompt construction for SQL-specialist models.
 
-CscSQL-Merge-Qwen2.5-Coder and the XiYanSQL-QwenCoder family it is built on were
-trained/evaluated with the **M-Schema** schema serialization, not raw `CREATE
-TABLE` DDL. Feeding such a specialist its native format (full schema, types,
-primary keys, foreign keys, and example values) — without few-shot crutches —
-is what unlocks its benchmark-level accuracy.
+Modern SQL-finetuned coder models are trained/evaluated with the **M-Schema**
+schema serialization, not raw `CREATE TABLE` DDL. Feeding such a specialist its
+native format (full schema, types, primary keys, foreign keys, and example
+values) — without few-shot crutches — is what unlocks its benchmark-level
+accuracy.
 
-M-Schema layout (per XiYan-SQL, arXiv:2411.08599)::
+M-Schema layout::
 
     【DB_ID】 my_db
     【Schema】
@@ -139,23 +139,34 @@ def build_m_schema_prompt(
     evidence: str = "",
     foreign_keys: Optional[List] = None,
     primary_keys: Optional[Dict[str, List[str]]] = None,
+    dialect: str = "SQLite",
 ) -> str:
-    """Build the full native prompt body (M-Schema + evidence + question).
+    """Build the full native prompt body in the specialist nl2sql template.
 
-    Deliberately minimal: no few-shot examples or verbose instructions, which
-    distract a finetuned specialist. The instruction matches the model's
-    training convention (output a single SQLite query).
+    Mirrors the specialist model's documented ``nl2sql`` template: a dialect-expert
+    instruction, the question FIRST, then the M-Schema body and evidence, then the
+    question REPEATED, and a terminal ```sql fence that primes a clean code block.
+    These structural details are load-bearing for the specialist model.
+
+    Deliberately minimal — no few-shot examples or verbose instructions.
     """
     m_schema = build_m_schema(db_id, schema_elements, foreign_keys, primary_keys)
-    sections = [m_schema, ""]
-    sections.append("【Question】")
-    sections.append(question.strip())
-    if evidence and evidence.strip():
-        sections.append("【Evidence】")
-        sections.append(evidence.strip())
-    sections.append("")
-    sections.append(
-        "Using valid SQLite, answer the question with a single SQL query. "
-        "Only output the SQL, no explanation."
-    )
+    q = question.strip()
+    ev = (evidence or "").strip()
+
+    sections = [
+        f"You are a {dialect} expert. Read and understand the 【Database Schema】 "
+        f"and the 【Evidence】, then use {dialect} knowledge to generate a single "
+        f"executable SQL query that answers the 【User Question】.",
+        "",
+        "【User Question】",
+        q,
+        "【Database Schema】",
+        m_schema,
+        "【Evidence】",
+        ev if ev else "None",
+        "【User Question】",
+        q,
+        "```sql",
+    ]
     return "\n".join(sections)

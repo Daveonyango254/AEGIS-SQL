@@ -34,7 +34,7 @@ slm:
   # --- Harness optimization knobs (all default-on, individually toggleable for ablations) ---
   max_input_length: 8192        # Prompt token budget (raised from 2048 so the question is never truncated)
   use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
-  prompt_format: m_schema       # 'm_schema' (native for XiYanSQL/CscSQL) or 'ddl' (CREATE TABLE + few-shot)
+  prompt_format: m_schema       # 'm_schema' (native for SQL-specialist models) or 'ddl' (CREATE TABLE + few-shot)
   full_schema: true             # Feed the complete DB schema (skip RAG) when it fits the token budget
   full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
   num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)

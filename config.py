@@ -53,7 +53,7 @@ class SLMConfig(BaseModel):
     prompt_format: str = Field(
         default="m_schema",
         description="Local prompt schema serialization: 'm_schema' (native format for "
-        "XiYanSQL/CscSQL specialists) or 'ddl' (CREATE TABLE + few-shot, for weak base models)",
+        "SQL-specialist models) or 'ddl' (CREATE TABLE + few-shot, for weak base models)",
     )
     full_schema: bool = Field(
         default=True,

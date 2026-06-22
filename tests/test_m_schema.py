@@ -1,7 +1,7 @@
 """Unit tests for the M-Schema prompt builder (prompts/m_schema.py).
 
-M-Schema is the native schema serialization CscSQL/XiYanSQL were trained on;
-feeding it (full schema, types, PK, FK, example values) is what lets the
+M-Schema is the native schema serialization SQL-specialist models are trained
+on; feeding it (full schema, types, PK, FK, example values) is what lets the
 specialist model reach its benchmark accuracy. Loaded directly so the test
 needs no torch / pydantic.
 
@@ -61,22 +61,31 @@ def test_m_schema_structure():
     assert "Examples: [1087.0]" in out
 
 
-def test_m_schema_prompt_has_question_and_evidence():
+def test_m_schema_prompt_matches_native_template():
     m = _load()
+    q = "How many active schools are there?"
     p = m.build_m_schema_prompt(
         "california_schools", ELEMENTS,
-        question="How many active schools are there?",
+        question=q,
         evidence="active means StatusType = 'Active'",
         foreign_keys=FKS, primary_keys=PKS,
     )
-    assert "【Question】" in p and "How many active schools are there?" in p
+    # Native specialist structure: dialect-expert instruction, question FIRST and
+    # REPEATED, schema + evidence sections, terminal ```sql fence.
+    assert "SQLite expert" in p
+    # Two 【User Question】 section headers (the instruction also names it once).
+    assert p.count("【User Question】") == 3
+    assert p.count(q) == 2  # the question text itself is repeated
+    assert "【Database Schema】" in p and "# Table: schools" in p
     assert "【Evidence】" in p and "StatusType = 'Active'" in p
-    assert "SQLite" in p
+    assert p.rstrip().endswith("```sql")
+    # question appears before the schema body (question-first ordering)
+    assert p.index(q) < p.index("# Table: schools")
     # no few-shot scaffolding for the specialist
     assert "Example 1" not in p and "CREATE TABLE" not in p
 
 
 if __name__ == "__main__":
     test_m_schema_structure()
-    test_m_schema_prompt_has_question_and_evidence()
+    test_m_schema_prompt_matches_native_template()
     print("All M-Schema tests passed.")
