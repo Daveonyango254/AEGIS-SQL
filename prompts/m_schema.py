@@ -1,12 +1,12 @@
-"""M-Schema prompt construction for SQL-specialist models (XiYanSQL / CscSQL).
+"""M-Schema prompt construction for SQL-specialist models.
 
-CscSQL-Merge-Qwen2.5-Coder and the XiYanSQL-QwenCoder family it is built on were
-trained/evaluated with the **M-Schema** schema serialization, not raw `CREATE
-TABLE` DDL. Feeding such a specialist its native format (full schema, types,
-primary keys, foreign keys, and example values) — without few-shot crutches —
-is what unlocks its benchmark-level accuracy.
+Modern SQL-finetuned coder models are trained/evaluated with the **M-Schema**
+schema serialization, not raw `CREATE TABLE` DDL. Feeding such a specialist its
+native format (full schema, types, primary keys, foreign keys, and example
+values) — without few-shot crutches — is what unlocks its benchmark-level
+accuracy.
 
-M-Schema layout (per XiYan-SQL, arXiv:2411.08599)::
+M-Schema layout::
 
     【DB_ID】 my_db
     【Schema】
@@ -141,9 +141,9 @@ def build_m_schema_prompt(
     primary_keys: Optional[Dict[str, List[str]]] = None,
     dialect: str = "SQLite",
 ) -> str:
-    """Build the full native prompt body in the XiYanSQL/CscSQL template.
+    """Build the full native prompt body in the specialist nl2sql template.
 
-    Mirrors the model's documented ``nl2sqlite`` template exactly: a dialect-expert
+    Mirrors the specialist model's documented ``nl2sql`` template: a dialect-expert
     instruction, the question FIRST, then the M-Schema body and evidence, then the
     question REPEATED, and a terminal ```sql fence that primes a clean code block.
     These structural details are load-bearing for the specialist model.

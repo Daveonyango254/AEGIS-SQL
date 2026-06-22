@@ -1,7 +1,7 @@
 """Unit tests for the M-Schema prompt builder (prompts/m_schema.py).
 
-M-Schema is the native schema serialization CscSQL/XiYanSQL were trained on;
-feeding it (full schema, types, PK, FK, example values) is what lets the
+M-Schema is the native schema serialization SQL-specialist models are trained
+on; feeding it (full schema, types, PK, FK, example values) is what lets the
 specialist model reach its benchmark accuracy. Loaded directly so the test
 needs no torch / pydantic.
 
@@ -70,7 +70,7 @@ def test_m_schema_prompt_matches_native_template():
         evidence="active means StatusType = 'Active'",
         foreign_keys=FKS, primary_keys=PKS,
     )
-    # Native XiYanSQL structure: dialect-expert instruction, question FIRST and
+    # Native specialist structure: dialect-expert instruction, question FIRST and
     # REPEATED, schema + evidence sections, terminal ```sql fence.
     assert "SQLite expert" in p
     # Two 【User Question】 section headers (the instruction also names it once).

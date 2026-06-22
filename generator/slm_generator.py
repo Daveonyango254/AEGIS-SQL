@@ -259,7 +259,7 @@ class SLMGenerator:
         if use_chat and chat_template:
             try:
                 if getattr(self.config, "prompt_format", "ddl") == "m_schema":
-                    # Native XiYanSQL/CscSQL usage: a single user turn carrying the
+                    # Native specialist usage: a single user turn carrying the
                     # full template (no separate system prompt), matching training.
                     messages = [{"role": "user", "content": user_content}]
                 else:
