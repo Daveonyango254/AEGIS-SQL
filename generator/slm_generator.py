@@ -383,20 +383,23 @@ class SLMGenerator:
                 foreign_keys=foreign_keys,
                 primary_keys=primary_keys,
             )
-        return self._format_prompt_ddl(query, schema_elements)
+        return self._format_prompt_ddl(query, schema_elements, schema=schema)
 
     def _format_prompt_ddl(
-        self, query: Query, schema_elements: List[SchemaElement]
+        self, query: Query, schema_elements: List[SchemaElement], schema=None
     ) -> str:
         """Format prompt for SLM generation with CREATE TABLE syntax, FK hints, and examples.
 
         Args:
             query: Natural language query
             schema_elements: Schema elements
+            schema: Full Schema (for real foreign keys / primary keys)
 
         Returns:
             Formatted prompt string with CREATE TABLE structure, FK relationships, and few-shot examples
         """
+        expose_keys = getattr(self.config, "expose_keys", True)
+
         # Group schema elements by table
         tables = {}
         for elem in schema_elements:
@@ -406,26 +409,31 @@ class SLMGenerator:
                     tables[table] = []
                 tables[table].append(elem)
 
-        # Extract FK relationships from schema (from query.schema if available)
+        # Real FK/PK from the populated Schema (query.schema is never set). These
+        # join keys are the lever for multi-table queries (the dominant failure).
+        primary_keys = (getattr(schema, "primary_keys", None) or {}) if expose_keys else {}
         fk_relationships = []
-        if hasattr(query, 'schema') and query.schema and hasattr(query.schema, 'foreign_keys'):
-            # Get all FKs that involve tables in our retrieved schema
+        if expose_keys and getattr(schema, "foreign_keys", None):
             table_names_set = set(tables.keys())
-            for fk in query.schema.foreign_keys:
-                if fk.from_table in table_names_set or fk.to_table in table_names_set:
+            for fk in schema.foreign_keys:
+                if fk.from_table in table_names_set and fk.to_table in table_names_set:
                     fk_relationships.append(fk)
 
         # Format as CREATE TABLE statements with backticks for special characters
         schema_str = ""
         for table, cols in tables.items():
+            pk_cols = set(primary_keys.get(table, []))
             schema_str += f"CREATE TABLE {table} (\n"
             for col in cols:
-                col_name = col.name.split('.', 1)[1]
+                raw_col = col.name.split('.', 1)[1]
+                col_name = raw_col
                 # Add backticks for columns with spaces, parentheses, or special chars
                 if ' ' in col_name or '(' in col_name or '-' in col_name:
                     col_name = f"`{col_name}`"
                 col_type = col.data_type if col.data_type else "TEXT"
                 schema_str += f"  {col_name} {col_type}"
+                if raw_col in pk_cols:
+                    schema_str += " PRIMARY KEY"
                 # Build an inline comment from the description and any grounded values.
                 comment_parts = []
                 if col.description:

@@ -80,6 +80,11 @@ class SLMConfig(BaseModel):
         default=True,
         description="Wrap division numerators in CAST(... AS REAL) to fix integer-division ratio bugs",
     )
+    expose_keys: bool = Field(
+        default=True,
+        description="Expose real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt "
+        "(targets multi-table JOIN failures; retrieval already has ~99% table recall)",
+    )
     retrieval_top_k: int = Field(
         default=80,
         description="Number of schema columns retrieved before FK expansion",

@@ -41,6 +41,7 @@ slm:
   selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
+  expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
   retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
   adaptive_retrieval: false     # Corrective RAG: prune to anchor tables + FK neighbours (cuts table noise; ~99% recall already)
   retrieval_anchor_top_n: 12    # Top retrieved columns whose tables define the anchor set
