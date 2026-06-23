@@ -42,6 +42,9 @@ slm:
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
   retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
+  adaptive_retrieval: false     # Corrective RAG: prune to anchor tables + FK neighbours (cuts table noise; ~99% recall already)
+  retrieval_anchor_top_n: 12    # Top retrieved columns whose tables define the anchor set
+  max_expanded_tables: 3        # Max FK-connected tables added to the anchors
 
 # ============================================================================
 # Remote LLM Configuration (FLLM)

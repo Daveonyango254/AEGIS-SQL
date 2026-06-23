@@ -193,23 +193,24 @@ class SchemaRetriever:
         top_k: int = 10,
         use_hybrid: bool = True,
         expand_foreign_keys: bool = True,
-        max_expanded_tables: int = 3
+        max_expanded_tables: int = 3,
+        adaptive: bool = False,
+        anchor_top_n: int = 12,
     ) -> List[SchemaElement]:
         """Retrieve top-k schema elements relevant to the query.
 
         Uses BGE-M3 hybrid retrieval (dense + sparse) for multilingual support,
-        with optional FK expansion to include related tables.
-
-        Two-stage retrieval:
-        1. Semantic retrieval: Get top_k columns using BGE-M3
-        2. FK expansion: Add columns from FK-related tables (if enabled)
+        then either FK expansion (recall-oriented) or corrective pruning
+        (precision-oriented) depending on ``adaptive``.
 
         Args:
             query: Natural language query
             top_k: Number of schema elements to retrieve via semantic search
             use_hybrid: Use both dense and sparse retrieval (default: True)
             expand_foreign_keys: If True, expand retrieval to include FK-related tables
-            max_expanded_tables: Max number of additional tables to add via FK expansion
+            max_expanded_tables: Max number of additional FK tables to include
+            adaptive: If True, prune to anchor tables + FK neighbours (corrective RAG)
+            anchor_top_n: Top-ranked columns whose tables define the anchor set
 
         Returns:
             List of retrieved schema elements, ranked by relevance
@@ -217,11 +218,36 @@ class SchemaRetriever:
         # Stage 1: Semantic retrieval
         retrieved = self._semantic_retrieve(query, top_k, use_hybrid)
 
-        # Stage 2: FK expansion (if enabled and FKs available)
-        if expand_foreign_keys and self.schema.foreign_keys:
+        # Stage 2: corrective pruning (precision) OR FK expansion (recall).
+        if adaptive and self.schema.foreign_keys:
+            retrieved = self._corrective_select(retrieved, anchor_top_n, max_expanded_tables)
+        elif expand_foreign_keys and self.schema.foreign_keys:
             retrieved = self._expand_with_foreign_keys(retrieved, max_expanded_tables)
 
         return retrieved
+
+    def _corrective_select(
+        self, retrieved: List[SchemaElement], anchor_top_n: int, max_neighbor_tables: int
+    ) -> List[SchemaElement]:
+        """Prune retrieved columns to anchor tables + FK neighbours (corrective RAG)."""
+        from retriever.corrective import corrective_select
+
+        by_name = {c.name: c for c in self.schema.columns}
+        ranked_names = [c.name for c in retrieved]
+        selected = corrective_select(
+            ranked_names,
+            foreign_keys=self.schema.foreign_keys,
+            primary_keys=self.schema.primary_keys,
+            anchor_top_n=anchor_top_n,
+            max_neighbor_tables=max_neighbor_tables,
+        )
+        out = [by_name[n] for n in selected if n in by_name]
+        kept_tables = {n.split(".", 1)[0] for n in selected if "." in n}
+        logger.info(
+            f"CORRECTIVE_RETRIEVAL: {len(retrieved)}→{len(out)} columns, "
+            f"{len(kept_tables)} tables kept"
+        )
+        return out
 
     def _semantic_retrieve(
         self, query: Query, top_k: int, use_hybrid: bool

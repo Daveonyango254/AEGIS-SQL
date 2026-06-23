@@ -84,6 +84,19 @@ class SLMConfig(BaseModel):
         default=80,
         description="Number of schema columns retrieved before FK expansion",
     )
+    adaptive_retrieval: bool = Field(
+        default=False,
+        description="Corrective RAG: prune retrieved columns to anchor tables + FK neighbours "
+        "(reduces table noise; retrieval already has ~99% table recall)",
+    )
+    retrieval_anchor_top_n: int = Field(
+        default=12,
+        description="Top-ranked retrieved columns whose tables define the anchor set (adaptive_retrieval)",
+    )
+    max_expanded_tables: int = Field(
+        default=3,
+        description="Max FK-connected tables added to the anchors (retrieval expansion)",
+    )
 
 
 class LLMConfig(BaseModel):

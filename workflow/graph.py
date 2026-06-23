@@ -284,7 +284,9 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
             query,
             top_k=top_k,  # Raised so needed columns are not dropped on larger schemas
             expand_foreign_keys=True,  # Enable FK expansion to include related tables
-            max_expanded_tables=3  # Add up to 3 FK-related tables
+            max_expanded_tables=cfg.slm.max_expanded_tables if cfg else 3,
+            adaptive=cfg.slm.adaptive_retrieval if cfg else False,  # corrective pruning
+            anchor_top_n=cfg.slm.retrieval_anchor_top_n if cfg else 12,
         )
 
     # Value grounding: attach sampled DB values / value-linking hints so the model
