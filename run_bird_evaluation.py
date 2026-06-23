@@ -218,6 +218,9 @@ def main():
                     "schema_valid": verification_result.schema_valid if verification_result else None,
                     "execution_valid": verification_result.execution_valid if verification_result else None,
                     "difficulty": query_dict.get('difficulty', 'unknown'),
+                    # Retrieval diagnostics (table recall / noise analysis).
+                    "retrieved_tables": result.get("retrieved_tables", []),
+                    "num_retrieved_columns": result.get("num_retrieved_columns", 0),
                 }
 
                 predictions.append(prediction)

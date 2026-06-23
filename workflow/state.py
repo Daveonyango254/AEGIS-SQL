@@ -74,6 +74,9 @@ class AEGISState(TypedDict, total=False):
     # Schema Extraction
     schema: Optional[Schema]  # Full database schema
     schema_elements: List[SchemaElement]
+    # Retrieval observability (declared so LangGraph persists them as channels).
+    retrieved_tables: List[str]  # Distinct tables covered by the retrieved elements
+    num_retrieved_columns: int  # Number of retrieved schema columns
 
     # Routing
     routing_decision: RoutingDecision

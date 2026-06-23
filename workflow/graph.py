@@ -307,9 +307,21 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
 
     state["schema_elements"] = schema_elements
 
-    # Log extracted schema for observability
+    # Retrieval observability: per-table column counts so we can measure whether
+    # the needed tables were actually retrieved (table recall) vs dropped.
+    import collections as _collections
+    table_counts = _collections.Counter(
+        e.name.split(".", 1)[0] for e in schema_elements if "." in e.name
+    )
+    state["retrieved_tables"] = sorted(table_counts)
+    state["num_retrieved_columns"] = len(schema_elements)
+
     logger.info(f"QUERY_PLANNER_COMPLETE: Retrieved {len(schema_elements)} elements")
-    logger.info(f"EXTRACTED_SCHEMA: {[elem.name for elem in schema_elements[:5]]}")  # Log first 5 elements
+    logger.info(
+        "RETRIEVAL_COVERAGE: %d tables, %d columns -> %s"
+        % (len(table_counts), len(schema_elements),
+           {t: c for t, c in table_counts.most_common()})
+    )
 
     return state
 
