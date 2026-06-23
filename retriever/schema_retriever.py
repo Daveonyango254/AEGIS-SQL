@@ -285,9 +285,20 @@ class SchemaRetriever:
             # Return corresponding schema elements
             retrieved = [self.schema.columns[idx] for idx in top_k_indices]
 
-            logger.debug(
-                f"Semantic retrieval: {len(retrieved)} columns "
-                f"(top score: {scores[top_k_indices[0]]:.3f})"
+            # Observability: log top matches with scores + the semantic table set
+            # so we can diagnose whether the right tables surface before FK expansion.
+            top_n = min(10, len(top_k_indices))
+            preview = [
+                (self.schema.columns[i].name, round(float(scores[i]), 3))
+                for i in top_k_indices[:top_n]
+            ]
+            sem_tables = sorted({
+                self.schema.columns[i].name.split(".", 1)[0]
+                for i in top_k_indices if "." in self.schema.columns[i].name
+            })
+            logger.info(
+                "RETRIEVAL_SEMANTIC: %d cols, tables=%s, top%d=%s"
+                % (len(retrieved), sem_tables, top_n, preview)
             )
 
             return retrieved
@@ -347,8 +358,8 @@ class SchemaRetriever:
                     expanded.append(col)
 
         logger.info(
-            f"FK expansion: {len(retrieved)} → {len(expanded)} columns "
-            f"(+{len(new_tables)} tables via FKs)"
+            "RETRIEVAL_FK_EXPANSION: %d → %d columns (+%d tables via FKs: %s)"
+            % (len(retrieved), len(expanded), len(new_tables), sorted(new_tables))
         )
 
         return expanded
