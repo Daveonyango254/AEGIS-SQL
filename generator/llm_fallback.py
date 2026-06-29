@@ -66,6 +66,8 @@ class LLMFallback:
         schema_elements: List[SchemaElement],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        schema=None,
+        feedback: Optional[str] = None,
     ) -> SQL:
         """Generate SQL from abstracted query using remote LLM.
 
@@ -77,6 +79,10 @@ class LLMFallback:
             schema_elements: Schema elements (may also be abstracted)
             max_tokens: Maximum tokens (defaults to config)
             temperature: Temperature (defaults to config)
+            schema: Full Schema (for real foreign keys / primary keys), mirroring
+                the local SLM prompt so both paths get identical join grounding
+            feedback: Verifier feedback on a repair pass (appended to the prompt;
+                at temperature 0 a feedback-free regen would be a no-op)
 
         Returns:
             Generated SQL query (with placeholders, needs reconstruction)
@@ -100,7 +106,9 @@ class LLMFallback:
         temperature = temperature or self.config.temperature
 
         # Format prompt
-        prompt = self._format_prompt(abstracted_query, schema_elements)
+        prompt = self._format_prompt(
+            abstracted_query, schema_elements, schema=schema, feedback=feedback
+        )
 
         # Call LLM API based on provider
         if self.provider == "openai":
@@ -238,18 +246,27 @@ class LLMFallback:
         raise last_error
 
     def _format_prompt(
-        self, abstracted_query: AbstractedPrompt, schema_elements: List[SchemaElement]
+        self,
+        abstracted_query: AbstractedPrompt,
+        schema_elements: List[SchemaElement],
+        schema=None,
+        feedback: Optional[str] = None,
     ) -> str:
-        """Format prompt for LLM generation with CREATE TABLE syntax and FK hints.
+        """Format prompt for LLM generation with CREATE TABLE syntax and FK/PK hints.
+
+        Mirrors the local SLM's DDL prompt so a remote-vs-local comparison swaps
+        only the model, not the schema grounding: real foreign keys (JOIN hints)
+        and PRIMARY KEY markers are rendered from the populated ``schema`` rather
+        than the never-set ``abstracted_query.schema``.
 
         Args:
             abstracted_query: Abstracted query
             schema_elements: Schema elements
+            schema: Full Schema (for real foreign keys / primary keys)
+            feedback: Verifier feedback to append on a repair pass
 
         Returns:
             Formatted prompt string
-
-        Formats prompt with abstracted query and schema for the LLM.
         """
         # Group schema elements by table
         tables = {}
@@ -260,26 +277,32 @@ class LLMFallback:
                     tables[table] = []
                 tables[table].append(elem)
 
-        # Extract FK relationships from schema (from query.schema if available)
+        # Real FK/PK from the populated Schema (abstracted_query.schema is never
+        # set). FKs are filtered to retrieved tables on BOTH endpoints so JOIN
+        # hints only reference tables actually present in the prompt.
+        primary_keys = getattr(schema, "primary_keys", None) or {}
         fk_relationships = []
-        if hasattr(abstracted_query, 'schema') and abstracted_query.schema and hasattr(abstracted_query.schema, 'foreign_keys'):
-            # Get all FKs that involve tables in our retrieved schema
+        if getattr(schema, "foreign_keys", None):
             table_names_set = set(tables.keys())
-            for fk in abstracted_query.schema.foreign_keys:
-                if fk.from_table in table_names_set or fk.to_table in table_names_set:
+            for fk in schema.foreign_keys:
+                if fk.from_table in table_names_set and fk.to_table in table_names_set:
                     fk_relationships.append(fk)
 
         # Format as CREATE TABLE statements
         schema_str = ""
         for table, cols in tables.items():
+            pk_cols = set(primary_keys.get(table, []))
             schema_str += f"CREATE TABLE {table} (\n"
             for col in cols:
-                col_name = col.name.split('.', 1)[1]
+                raw_col = col.name.split('.', 1)[1]
+                col_name = raw_col
                 # Add backticks for special characters
                 if ' ' in col_name or '(' in col_name or '-' in col_name:
                     col_name = f"`{col_name}`"
                 col_type = col.data_type if col.data_type else "TEXT"
                 schema_str += f"  {col_name} {col_type}"
+                if raw_col in pk_cols:
+                    schema_str += " PRIMARY KEY"
                 if col.description:
                     schema_str += f" -- {col.description}"
                 schema_str += ",\n"
@@ -301,9 +324,17 @@ class LLMFallback:
         if abstracted_query.evidence:
             evidence_section = f"\nDomain Knowledge:\n{abstracted_query.evidence}\n"
 
+        # On a repair pass, surface why the previous attempt was rejected.
+        feedback_section = ""
+        if feedback:
+            feedback_section = (
+                f"\nThe previous attempt was rejected by the verifier:\n"
+                f"{feedback}\nGenerate a corrected SQL query.\n"
+            )
+
         prompt = f"""Given the following SQLite database schema:
 
-{schema_str}{fk_hints}{evidence_section}
+{schema_str}{fk_hints}{evidence_section}{feedback_section}
 Generate a valid SQLite query to answer this question:
 {abstracted_query.text}
 

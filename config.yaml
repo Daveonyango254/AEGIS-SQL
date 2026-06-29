@@ -34,7 +34,6 @@ slm:
   # --- Harness optimization knobs (all default-on, individually toggleable for ablations) ---
   max_input_length: 8192        # Prompt token budget (raised from 2048 so the question is never truncated)
   use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
-  prompt_format: ddl            # 'ddl' (CREATE TABLE + few-shot; stable ~42% baseline) or 'm_schema' (experimental)
   full_schema: false            # Use top_k RAG retrieval (the stable baseline); true = inline the complete schema
   full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
   num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
@@ -43,8 +42,6 @@ slm:
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
   expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
   retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
-  adaptive_retrieval: false     # Corrective RAG: prune to anchor tables + FK neighbours (cuts table noise; ~99% recall already)
-  retrieval_anchor_top_n: 12    # Top retrieved columns whose tables define the anchor set
   max_expanded_tables: 3        # Max FK-connected tables added to the anchors
 
 # ============================================================================

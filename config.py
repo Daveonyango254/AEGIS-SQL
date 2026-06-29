@@ -50,11 +50,6 @@ class SLMConfig(BaseModel):
         default=True,
         description="Apply the tokenizer chat template (system+user) for instruct models",
     )
-    prompt_format: str = Field(
-        default="ddl",
-        description="Local prompt schema serialization: 'ddl' (CREATE TABLE + few-shot; stable "
-        "baseline) or 'm_schema' (experimental native format for SQL-specialist models)",
-    )
     full_schema: bool = Field(
         default=False,
         description="Feed the complete DB schema (skip RAG retrieval) when it fits the "
@@ -88,15 +83,6 @@ class SLMConfig(BaseModel):
     retrieval_top_k: int = Field(
         default=80,
         description="Number of schema columns retrieved before FK expansion",
-    )
-    adaptive_retrieval: bool = Field(
-        default=False,
-        description="Corrective RAG: prune retrieved columns to anchor tables + FK neighbours "
-        "(reduces table noise; retrieval already has ~99% table recall)",
-    )
-    retrieval_anchor_top_n: int = Field(
-        default=12,
-        description="Top-ranked retrieved columns whose tables define the anchor set (adaptive_retrieval)",
     )
     max_expanded_tables: int = Field(
         default=3,
