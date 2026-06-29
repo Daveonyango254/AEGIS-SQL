@@ -59,12 +59,11 @@ llm:
 
 # ============================================================================
 # Privacy Configuration (DP Abstraction)
+# Disabled for the remote gpt-4o oracle run; for hybrid mode set epsilon=1.0 and
+# abstraction_enabled=true and reconstruction_enabled=true.
 # ============================================================================
-# NOTE: disabled for the current remote gpt-4o oracle run (measure the model, not
-# the privacy round-trip). Restore epsilon=1.0 / abstraction_enabled=true /
-# reconstruction_enabled=true for the privacy-preserving hybrid mode.
 privacy:
-  epsilon: 0.0  # ε privacy budget (0 = disable abstraction)
+  epsilon: 0.0  # privacy budget (0 = disable abstraction)
   abstraction_enabled: false  # Enable DP abstraction for remote queries
   value_aware_abstraction: true  # Abstract only value-like tokens (proper nouns/literals), never schema words like 'name'/'price'
   reconstruction_enabled: false  # Enable reconstruction (must match abstraction_enabled)
