@@ -193,20 +193,19 @@ def run_ex_evaluation(predictions_file: Path, bird_path: str) -> dict:
 
     logger.info(f"✓ EX evaluation completed in {elapsed:.1f} seconds")
 
-    # Parse EX results from output
-    output_lines = result.stdout.split('\n')
+    # Parse EX results from output. The evaluator prints (via print_data):
+    #   Overall:     47.00% (100 queries)   (+ Simple/Moderate/Challenging lines)
+    import re
     ex_results = {}
-
-    for line in output_lines:
-        if "execution accuracy" in line.lower():
-            # Extract accuracy value
-            try:
-                parts = line.split(':')
-                if len(parts) >= 2:
-                    accuracy_str = parts[1].strip().rstrip('%')
-                    ex_results['execution_accuracy'] = float(accuracy_str) / 100
-            except:
-                pass
+    # Use the LAST printed result block (the final aggregate the evaluator also
+    # saves to ex_results.txt); an earlier intermediate block can differ by a query.
+    overalls = re.findall(r'Overall:\s*([\d.]+)\s*%', result.stdout)
+    if overalls:
+        ex_results['execution_accuracy'] = float(overalls[-1]) / 100.0
+    for diff in ('Simple', 'Moderate', 'Challenging'):
+        dms = re.findall(rf'{diff}:\s*([\d.]+)\s*%', result.stdout)
+        if dms:
+            ex_results[f'{diff.lower()}_accuracy'] = float(dms[-1]) / 100.0
 
     if 'execution_accuracy' not in ex_results:
         logger.warning("Could not parse execution accuracy from output")
@@ -255,19 +254,13 @@ def run_ves_evaluation(predictions_file: Path, bird_path: str) -> dict:
 
     logger.info(f"✓ VES evaluation completed in {elapsed:.1f} seconds")
 
-    # Parse VES results from output
-    output_lines = result.stdout.split('\n')
+    # Parse VES results from output. The evaluator prints (via print_data):
+    #   Overall:     85.30% (100 queries)   where the value is the VES score.
+    import re
     ves_results = {}
-
-    for line in output_lines:
-        if "ves score" in line.lower() or "valid efficiency" in line.lower():
-            try:
-                parts = line.split(':')
-                if len(parts) >= 2:
-                    score_str = parts[1].strip().rstrip('%')
-                    ves_results['ves_score'] = float(score_str)
-            except:
-                pass
+    overalls = re.findall(r'Overall:\s*([\d.]+)\s*%', result.stdout)
+    if overalls:
+        ves_results['ves_score'] = float(overalls[-1])
 
     if 'ves_score' not in ves_results:
         logger.warning("Could not parse VES score from output")

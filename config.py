@@ -50,11 +50,6 @@ class SLMConfig(BaseModel):
         default=True,
         description="Apply the tokenizer chat template (system+user) for instruct models",
     )
-    prompt_format: str = Field(
-        default="ddl",
-        description="Local prompt schema serialization: 'ddl' (CREATE TABLE + few-shot; stable "
-        "baseline) or 'm_schema' (experimental native format for SQL-specialist models)",
-    )
     full_schema: bool = Field(
         default=False,
         description="Feed the complete DB schema (skip RAG retrieval) when it fits the "
@@ -88,15 +83,6 @@ class SLMConfig(BaseModel):
     retrieval_top_k: int = Field(
         default=80,
         description="Number of schema columns retrieved before FK expansion",
-    )
-    adaptive_retrieval: bool = Field(
-        default=False,
-        description="Corrective RAG: prune retrieved columns to anchor tables + FK neighbours "
-        "(reduces table noise; retrieval already has ~99% table recall)",
-    )
-    retrieval_anchor_top_n: int = Field(
-        default=12,
-        description="Top-ranked retrieved columns whose tables define the anchor set (adaptive_retrieval)",
     )
     max_expanded_tables: int = Field(
         default=3,
@@ -375,6 +361,12 @@ class AEGISConfig(BaseSettings):
         from dotenv import load_dotenv
         load_dotenv()
 
+        # Propagate the user's HF token to the standard HF_TOKEN env var so every
+        # downloader (transformers, and FlagEmbedding/BGE-M3 which does not take a
+        # token kwarg) authenticates — silences the "unauthenticated requests to
+        # the HF Hub" warning when a token is configured.
+        cls._propagate_hf_token()
+
         config_path = Path(config_path)
         if not config_path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -386,6 +378,22 @@ class AEGISConfig(BaseSettings):
         config_dict = cls._substitute_env_vars(config_dict)
 
         return cls(**config_dict)
+
+    @staticmethod
+    def _propagate_hf_token() -> None:
+        """Set HF_TOKEN from any configured HF token var if not already set.
+
+        huggingface_hub authenticates from HF_TOKEN; FlagEmbedding (BGE-M3) has no
+        token argument, so exporting HF_TOKEN is the portable way to authenticate
+        both the embedding and SLM downloads.
+        """
+        if os.getenv("HF_TOKEN"):
+            return
+        for var in ("HF_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+            token = os.getenv(var)
+            if token:
+                os.environ["HF_TOKEN"] = token
+                return
 
     @staticmethod
     def _substitute_env_vars(config_dict: dict) -> dict:

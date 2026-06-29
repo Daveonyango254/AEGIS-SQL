@@ -5,7 +5,7 @@ counter incremented in fslm_generation_node) and `_candidate_exec` (execution
 diagnostics read by verification_node) were written to the LangGraph state but
 NOT declared in the AEGISState TypedDict. LangGraph only persists declared keys
 as channels across super-steps, so the counter reset every iteration and
-should_repair (generations > max_repairs) never tripped -> the verify->generate
+repair_route (generations > max_repairs) never tripped -> the verify->generate
 loop ran until the recursion limit.
 
 This test guards two things:
@@ -64,7 +64,7 @@ def test_repair_loop_terminates_only_when_counter_persisted():
             state["failed"] = True  # pretend verification always fails
             return state
 
-        def should_repair(state):  # mirrors graph.should_repair
+        def should_repair(state):  # mirrors graph.repair_route's bound check
             if state.get("generation_count", 1) > max_repairs:
                 return False
             return state.get("failed", False)

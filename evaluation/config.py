@@ -8,8 +8,9 @@ from pathlib import Path
 # Output directory for evaluation results
 OUTPUT_DIR = Path("evaluation/output")
 
-# Default query timeout in seconds
-DEFAULT_QUERY_TIMEOUT = 5
+# Default query timeout in seconds. Raised 5->30 so slow-but-correct queries are
+# not clipped to 0 (the 5s cap was pinning EX P95/P99 and adding run-to-run noise).
+DEFAULT_QUERY_TIMEOUT = 30
 
 # Maximum number of rows to fetch for comparison
 MAX_ROWS = 10000

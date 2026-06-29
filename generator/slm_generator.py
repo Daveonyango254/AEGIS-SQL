@@ -82,17 +82,22 @@ class SLMGenerator:
                 trust_remote_code=config.trust_remote_code,
             )
 
-            # Get torch dtype
-            torch_dtype = getattr(torch, config.torch_dtype)
+            # Resolve dtype. transformers >= 4.56 renamed the `torch_dtype`
+            # argument to `dtype` (and deprecated the old name); pick whichever
+            # the installed version accepts.
+            dtype = getattr(torch, config.torch_dtype)
+            import transformers
+            _tf_ver = tuple(int(p) for p in transformers.__version__.split(".")[:2])
+            dtype_kwarg = "dtype" if _tf_ver >= (4, 56) else "torch_dtype"
 
             # Load model
             self.model = AutoModelForCausalLM.from_pretrained(
                 config.model,
                 device_map=config.device,
-                torch_dtype=torch_dtype,
                 token=hf_token,
                 cache_dir=str(cache_dir),
                 trust_remote_code=config.trust_remote_code,
+                **{dtype_kwarg: dtype},
             )
 
             # Load LoRA adapter if specified
@@ -258,17 +263,12 @@ class SLMGenerator:
         chat_template = getattr(self.tokenizer, "chat_template", None)
         if use_chat and chat_template:
             try:
-                if getattr(self.config, "prompt_format", "ddl") == "m_schema":
-                    # Native specialist usage: a single user turn carrying the
-                    # full template (no separate system prompt), matching training.
-                    messages = [{"role": "user", "content": user_content}]
-                else:
-                    prompt_mgr = get_prompt_manager()
-                    system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ]
+                prompt_mgr = get_prompt_manager()
+                system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ]
                 prompt_text = self.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
@@ -365,24 +365,7 @@ class SLMGenerator:
     def _format_prompt(
         self, query: Query, schema_elements: List[SchemaElement], schema=None
     ) -> str:
-        """Dispatch prompt construction by configured format.
-
-        'm_schema' → native M-Schema for SQL-specialist models (default);
-        'ddl' → CREATE TABLE + few-shot for weak base models.
-        """
-        if getattr(self.config, "prompt_format", "ddl") == "m_schema":
-            from prompts.m_schema import build_m_schema_prompt
-
-            foreign_keys = getattr(schema, "foreign_keys", None)
-            primary_keys = getattr(schema, "primary_keys", None)
-            return build_m_schema_prompt(
-                db_id=query.database_id,
-                schema_elements=schema_elements,
-                question=query.text,
-                evidence=getattr(query, "evidence", "") or "",
-                foreign_keys=foreign_keys,
-                primary_keys=primary_keys,
-            )
+        """Build the DDL prompt (CREATE TABLE + FK/PK hints + few-shot)."""
         return self._format_prompt_ddl(query, schema_elements, schema=schema)
 
     def _format_prompt_ddl(
@@ -487,10 +470,9 @@ class SLMGenerator:
         """
         sql = output.strip()
 
-        # The native m_schema prompt ends with ```sql, so the model completes the
-        # query and then emits a closing ```. Strip any surrounding code fences
-        # (leading ```sql/``` and everything after a closing ```), otherwise the
-        # trailing fence leaks into the SQL and fails grammar verification.
+        # Strip any surrounding markdown code fences (leading ```sql/``` and
+        # everything after a closing ```), otherwise a trailing fence leaks into
+        # the SQL and fails grammar verification.
         if sql.startswith("```sql"):
             sql = sql[6:]
         elif sql.startswith("```"):

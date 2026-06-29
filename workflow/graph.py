@@ -117,13 +117,14 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
     )
     workflow.add_edge("reconstruction", "verification")
 
-    # Verification → (repair local path) OR END
+    # Verification → repair via the originating generator (SLM or remote LLM) OR END
     workflow.add_conditional_edges(
         "verification",
-        should_repair,
+        repair_route,
         {
-            True: "fslm_generation",  # Self-correction: regenerate with feedback
-            False: END,
+            "fslm": "fslm_generation",  # Local self-correction
+            "fllm": "fllm_generation",  # Remote self-correction
+            "end": END,
         },
     )
 
@@ -285,8 +286,6 @@ def schema_extraction_node(state: AEGISState) -> AEGISState:
             top_k=top_k,  # Raised so needed columns are not dropped on larger schemas
             expand_foreign_keys=True,  # Enable FK expansion to include related tables
             max_expanded_tables=cfg.slm.max_expanded_tables if cfg else 3,
-            adaptive=cfg.slm.adaptive_retrieval if cfg else False,  # corrective pruning
-            anchor_top_n=cfg.slm.retrieval_anchor_top_n if cfg else 12,
         )
 
     # Value grounding: attach sampled DB values / value-linking hints so the model
@@ -515,7 +514,21 @@ def fllm_generation_node(state: AEGISState) -> AEGISState:
             evidence=query.evidence,  # NEW: Pass evidence through
         )
 
-    sql = generator.generate(abstracted_prompt, schema_elements)
+    # Track generation count to bound the self-correction loop (shared with the
+    # local path; only one path runs per query).
+    state["generation_count"] = state.get("generation_count", 0) + 1
+
+    # On a repair pass, feed the verifier's structured feedback back to the model
+    # (at temperature 0 a feedback-free regen would reproduce the same SQL).
+    feedback = None
+    prev_vr = state.get("verification_result")
+    if prev_vr is not None and getattr(prev_vr, "structured_feedback", None):
+        feedback = prev_vr.structured_feedback.get("feedback")
+
+    schema = state.get("schema")
+    sql = generator.generate(
+        abstracted_prompt, schema_elements, schema=schema, feedback=feedback
+    )
 
     state["sql"] = sql
     state["generation_source"] = "llm"
@@ -752,37 +765,37 @@ def should_reconstruct(state: AEGISState) -> bool:
     return state.get("reconstruction_map") is not None
 
 
-def should_repair(state: AEGISState) -> bool:
-    """Determine if a failed local query should be regenerated with feedback.
+def repair_route(state: AEGISState) -> str:
+    """Route a failed query back to the generator that produced it, or to END.
 
-    Bounds the self-correction loop by ``verifier.max_repair_attempts`` and only
-    repairs the LOCAL (FSLM) path — the remote path goes straight to END.
+    Bounds the self-correction loop by ``verifier.max_repair_attempts``. The
+    repair is path-aware: a LOCAL query regenerates with the SLM and a REMOTE
+    query regenerates with the same remote LLM (so a remote run measures the
+    remote model end-to-end, not a silent SLM fallback).
 
     Args:
         state: Current workflow state
 
     Returns:
-        True to loop back to fslm_generation, False to end.
+        "fslm" / "fllm" to loop back to that generator, or "end".
     """
     vr = state.get("verification_result")
     if vr is None or vr.status == VerificationStatus.PASS:
-        return False
-
-    # Only repair the local path.
-    if state.get("routing_decision") != RoutingDecision.LOCAL:
-        return False
+        return "end"
 
     from workflow.model_cache import get_cache
     cfg = get_cache()._config
     max_repairs = cfg.verifier.max_repair_attempts if cfg else 1
 
-    # generation_count == number of FSLM generations so far (initial + repairs).
+    # generation_count == number of generations so far (initial + repairs).
     generations = state.get("generation_count", 1)
     if generations > max_repairs:
-        return False
+        return "end"
 
+    remote = state.get("routing_decision") == RoutingDecision.REMOTE
+    target = "fllm" if remote else "fslm"
     logger.info(
-        f"SELF_CORRECTION: regenerating (attempt {generations}/{max_repairs}) "
-        f"after {vr.status.value}"
+        f"SELF_CORRECTION: regenerating via {target} "
+        f"(attempt {generations}/{max_repairs}) after {vr.status.value}"
     )
-    return True
+    return target

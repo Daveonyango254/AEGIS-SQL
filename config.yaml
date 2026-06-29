@@ -34,7 +34,6 @@ slm:
   # --- Harness optimization knobs (all default-on, individually toggleable for ablations) ---
   max_input_length: 8192        # Prompt token budget (raised from 2048 so the question is never truncated)
   use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
-  prompt_format: ddl            # 'ddl' (CREATE TABLE + few-shot; stable ~42% baseline) or 'm_schema' (experimental)
   full_schema: false            # Use top_k RAG retrieval (the stable baseline); true = inline the complete schema
   full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
   num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
@@ -43,8 +42,6 @@ slm:
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
   expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
   retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
-  adaptive_retrieval: false     # Corrective RAG: prune to anchor tables + FK neighbours (cuts table noise; ~99% recall already)
-  retrieval_anchor_top_n: 12    # Top retrieved columns whose tables define the anchor set
   max_expanded_tables: 3        # Max FK-connected tables added to the anchors
 
 # ============================================================================
@@ -62,9 +59,11 @@ llm:
 
 # ============================================================================
 # Privacy Configuration (DP Abstraction)
+# Hybrid mode (default). For the remote gpt-4o oracle run set epsilon=0 and
+# abstraction_enabled=false and reconstruction_enabled=false.
 # ============================================================================
 privacy:
-  epsilon: 1.0  # ε privacy budget (0 = disable abstraction)
+  epsilon: 1.0  # privacy budget (0 = disable abstraction)
   abstraction_enabled: true  # Enable DP abstraction for remote queries
   value_aware_abstraction: true  # Abstract only value-like tokens (proper nouns/literals), never schema words like 'name'/'price'
   reconstruction_enabled: true  # Enable reconstruction (must match abstraction_enabled)
@@ -115,7 +114,7 @@ verifier:
   execution_check_slm: true  # Enable execution verification for SLM outputs
   execution_check_llm: true  # Enable execution verification for LLM outputs
   sample_size: 100  # Number of rows for execution verification
-  timeout_seconds: 5  # Execution timeout per query
+  timeout_seconds: 30  # Execution timeout per query (raised 5->30 to stop clipping slow-but-correct SQL)
   max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
   repair_on_empty: true  # Treat an executed-but-empty result as a soft fail to trigger one value-aware repair
 
