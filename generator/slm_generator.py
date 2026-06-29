@@ -242,15 +242,66 @@ class SLMGenerator:
             logger.warning("Falling back to stub mode")
             return [self._generate_stub(schema_elements)]
 
+    def complete(
+        self,
+        prompt: str,
+        n: int = 1,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+    ) -> List[str]:
+        """Model-agnostic completion from a prebuilt prompt (booster interface).
+
+        Returns up to ``n`` finalized SQL strings: one greedy decode plus
+        ``n-1`` temperature samples. Used by the multi-agent generator to drive
+        arbitrary reasoning strategies through the same model plumbing as
+        ``generate_candidates``. Returns ``[]`` if the model is unavailable so the
+        caller can fall back to other strategies.
+        """
+        max_tokens = max_tokens or self.config.max_tokens
+        temperature = (
+            temperature if temperature is not None
+            else getattr(self.config, "selection_temperature", 0.8)
+        )
+        if self.model is None or self.tokenizer is None:
+            logger.warning("SLM not loaded; complete() returns no candidates")
+            return []
+
+        try:
+            inputs = self._build_inputs(
+                None, None, user_content=prompt, system_prompt=system_prompt
+            )
+            texts = self._run_generation(
+                inputs, max_tokens=max_tokens, do_sample=False,
+                temperature=0.0, num_return_sequences=1,
+            )
+            if n > 1 and temperature > 0:
+                texts.extend(self._run_generation(
+                    inputs, max_tokens=max_tokens, do_sample=True,
+                    temperature=temperature, num_return_sequences=n - 1,
+                ))
+            return [s for s in (self._finalize(t) for t in texts) if s]
+        except Exception as e:
+            logger.error(f"SLM complete() failed: {e}")
+            return []
+
     def _build_inputs(
         self,
         query: Query,
         schema_elements: List[SchemaElement],
         feedback: Optional[str] = None,
         schema=None,
+        user_content: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ):
-        """Build tokenized model inputs, applying the chat template when available."""
-        user_content = self._format_prompt(query, schema_elements, schema=schema)
+        """Build tokenized model inputs, applying the chat template when available.
+
+        ``user_content`` overrides the default DDL prompt (used by the multi-agent
+        booster to drive alternative reasoning strategies); ``system_prompt``
+        overrides the default system message (e.g. a chain-of-thought system prompt).
+        """
+        if user_content is None:
+            user_content = self._format_prompt(query, schema_elements, schema=schema)
         if feedback:
             user_content += (
                 f"\n\n-- The previous attempt was rejected by the verifier:\n"
@@ -264,7 +315,11 @@ class SLMGenerator:
         if use_chat and chat_template:
             try:
                 prompt_mgr = get_prompt_manager()
-                system_prompt = prompt_mgr.get_slm_system_prompt() or _DEFAULT_SLM_SYSTEM_PROMPT
+                system_prompt = (
+                    system_prompt
+                    or prompt_mgr.get_slm_system_prompt()
+                    or _DEFAULT_SLM_SYSTEM_PROMPT
+                )
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -371,90 +426,24 @@ class SLMGenerator:
     def _format_prompt_ddl(
         self, query: Query, schema_elements: List[SchemaElement], schema=None
     ) -> str:
-        """Format prompt for SLM generation with CREATE TABLE syntax, FK hints, and examples.
+        """Format the DDL prompt (CREATE TABLE + FK/PK hints + few-shot + question).
+
+        Delegates to the shared ``build_direct_prompt`` so the local SLM prompt and
+        the multi-agent ``direct`` strategy stay identical by construction.
 
         Args:
             query: Natural language query
             schema_elements: Schema elements
             schema: Full Schema (for real foreign keys / primary keys)
-
-        Returns:
-            Formatted prompt string with CREATE TABLE structure, FK relationships, and few-shot examples
         """
-        expose_keys = getattr(self.config, "expose_keys", True)
+        from prompts.sql_strategies import build_direct_prompt
 
-        # Group schema elements by table
-        tables = {}
-        for elem in schema_elements:
-            if '.' in elem.name:
-                table, col = elem.name.split('.', 1)
-                if table not in tables:
-                    tables[table] = []
-                tables[table].append(elem)
-
-        # Real FK/PK from the populated Schema (query.schema is never set). These
-        # join keys are the lever for multi-table queries (the dominant failure).
-        primary_keys = (getattr(schema, "primary_keys", None) or {}) if expose_keys else {}
-        fk_relationships = []
-        if expose_keys and getattr(schema, "foreign_keys", None):
-            table_names_set = set(tables.keys())
-            for fk in schema.foreign_keys:
-                if fk.from_table in table_names_set and fk.to_table in table_names_set:
-                    fk_relationships.append(fk)
-
-        # Format as CREATE TABLE statements with backticks for special characters
-        schema_str = ""
-        for table, cols in tables.items():
-            pk_cols = set(primary_keys.get(table, []))
-            schema_str += f"CREATE TABLE {table} (\n"
-            for col in cols:
-                raw_col = col.name.split('.', 1)[1]
-                col_name = raw_col
-                # Add backticks for columns with spaces, parentheses, or special chars
-                if ' ' in col_name or '(' in col_name or '-' in col_name:
-                    col_name = f"`{col_name}`"
-                col_type = col.data_type if col.data_type else "TEXT"
-                schema_str += f"  {col_name} {col_type}"
-                if raw_col in pk_cols:
-                    schema_str += " PRIMARY KEY"
-                # Build an inline comment from the description and any grounded values.
-                comment_parts = []
-                if col.description:
-                    comment_parts.append(col.description)
-                if col.example_values:
-                    vals = ", ".join(f"'{v}'" for v in col.example_values[:8])
-                    comment_parts.append(f"examples: {vals}")
-                if comment_parts:
-                    schema_str += " -- " + " | ".join(comment_parts)
-                schema_str += ",\n"
-            schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
-
-        # Add explicit FK relationship hints
-        fk_hint_str = ""
-        if fk_relationships:
-            fk_hint_str = "-- FOREIGN KEY RELATIONSHIPS (Use these for JOINs):\n"
-            for fk in fk_relationships:
-                fk_hint_str += f"--   {fk.from_table}.{fk.from_column} = {fk.to_table}.{fk.to_column}\n"
-            fk_hint_str += "\n"
-
-        # Load prompt manager for centralized templates
-        prompt_mgr = get_prompt_manager()
-
-        # Get few-shot examples from templates
-        examples = prompt_mgr.format_slm_examples()
-
-        # Get generic FK hints if multiple tables (from template)
-        table_names_list = list(tables.keys())
-        generic_fk_hints = prompt_mgr.get_slm_fk_hint(table_names_list)
-
-        # Get instructions
-        instructions = prompt_mgr.get_slm_instructions()
-
-        # Get question format (with evidence if available)
-        question_section = prompt_mgr.format_slm_question(query.text, query.evidence)
-
-        # Combine: schema → explicit FK hints → generic FK hints → examples → instructions → question
-        return f"{schema_str}{fk_hint_str}{generic_fk_hints}{examples}{instructions}{question_section}"
+        return build_direct_prompt(
+            query,
+            schema_elements,
+            schema=schema,
+            expose_keys=getattr(self.config, "expose_keys", True),
+        )
 
     def _extract_sql_from_output(self, output: str, prompt: str) -> str:
         """Extract SQL from model output.

@@ -231,6 +231,51 @@ class VerifierConfig(BaseModel):
     )
 
 
+class AgentsConfig(BaseModel):
+    """Multi-agent booster harness configuration.
+
+    Every lever is a flag so the cost<->accuracy frontier is directly A/B-able.
+    Defaults are the "moderate" booster: two complementary strategies, two
+    candidates each, execution-guided selection, and one execution-feedback
+    refine round.
+    """
+
+    strategies: List[str] = Field(
+        default=["direct", "query_plan"],
+        description="Reasoning strategies for candidate diversity: any of "
+        "'direct', 'query_plan', 'divide_and_conquer'",
+    )
+    candidates_per_strategy: int = Field(
+        default=2, description="Candidates sampled per strategy (1 greedy + rest sampled)"
+    )
+    generation_temperature: float = Field(
+        default=0.7, description="Sampling temperature for the non-greedy candidates"
+    )
+    refine_rounds: int = Field(
+        default=1, description="Bounded execution-feedback repair rounds on the winner (0 disables)"
+    )
+    judge_enabled: bool = Field(
+        default=True, description="Use the local model to break split execution votes (CHASE-SQL selector)"
+    )
+    max_judge_candidates: int = Field(
+        default=4, description="Cap on candidates shown to the selection judge"
+    )
+    selection_timeout: int = Field(
+        default=30, description="Per-candidate execution timeout (seconds) during selection/refine"
+    )
+
+    @field_validator("strategies")
+    @classmethod
+    def validate_strategies(cls, v: List[str]) -> List[str]:
+        allowed = {"direct", "query_plan", "divide_and_conquer"}
+        bad = [s for s in v if s not in allowed]
+        if bad:
+            raise ValueError(f"Unknown strategies {bad}; allowed: {sorted(allowed)}")
+        if not v:
+            raise ValueError("At least one generation strategy is required")
+        return v
+
+
 class EvaluationConfig(BaseModel):
     """Evaluation configuration."""
 
@@ -325,6 +370,10 @@ class AEGISConfig(BaseSettings):
     """
 
     language: Language = Field(default=Language.ENGLISH, description="Query language")
+    orchestrator: str = Field(
+        default="graph",
+        description="Per-query pipeline: 'graph' (LangGraph) or 'multi_agent' (booster)",
+    )
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     slm: SLMConfig = Field(default_factory=SLMConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -333,6 +382,7 @@ class AEGISConfig(BaseSettings):
     router: RouterConfig = Field(default_factory=RouterConfig)
     ambiguity: AmbiguityConfig = Field(default_factory=AmbiguityConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
