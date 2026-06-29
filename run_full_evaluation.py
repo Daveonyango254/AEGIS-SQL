@@ -197,13 +197,15 @@ def run_ex_evaluation(predictions_file: Path, bird_path: str) -> dict:
     #   Overall:     47.00% (100 queries)   (+ Simple/Moderate/Challenging lines)
     import re
     ex_results = {}
-    m = re.search(r'Overall:\s*([\d.]+)\s*%', result.stdout)
-    if m:
-        ex_results['execution_accuracy'] = float(m.group(1)) / 100.0
+    # Use the LAST printed result block (the final aggregate the evaluator also
+    # saves to ex_results.txt); an earlier intermediate block can differ by a query.
+    overalls = re.findall(r'Overall:\s*([\d.]+)\s*%', result.stdout)
+    if overalls:
+        ex_results['execution_accuracy'] = float(overalls[-1]) / 100.0
     for diff in ('Simple', 'Moderate', 'Challenging'):
-        dm = re.search(rf'{diff}:\s*([\d.]+)\s*%', result.stdout)
-        if dm:
-            ex_results[f'{diff.lower()}_accuracy'] = float(dm.group(1)) / 100.0
+        dms = re.findall(rf'{diff}:\s*([\d.]+)\s*%', result.stdout)
+        if dms:
+            ex_results[f'{diff.lower()}_accuracy'] = float(dms[-1]) / 100.0
 
     if 'execution_accuracy' not in ex_results:
         logger.warning("Could not parse execution accuracy from output")
@@ -256,9 +258,9 @@ def run_ves_evaluation(predictions_file: Path, bird_path: str) -> dict:
     #   Overall:     85.30% (100 queries)   where the value is the VES score.
     import re
     ves_results = {}
-    m = re.search(r'Overall:\s*([\d.]+)\s*%', result.stdout)
-    if m:
-        ves_results['ves_score'] = float(m.group(1))
+    overalls = re.findall(r'Overall:\s*([\d.]+)\s*%', result.stdout)
+    if overalls:
+        ves_results['ves_score'] = float(overalls[-1])
 
     if 'ves_score' not in ves_results:
         logger.warning("Could not parse VES score from output")
