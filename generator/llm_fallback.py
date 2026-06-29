@@ -303,8 +303,16 @@ class LLMFallback:
                 schema_str += f"  {col_name} {col_type}"
                 if raw_col in pk_cols:
                     schema_str += " PRIMARY KEY"
+                # Inline comment: description + grounded example values (parity with
+                # the SLM prompt). Value hints matter for BIRD's exact string literals.
+                comment_parts = []
                 if col.description:
-                    schema_str += f" -- {col.description}"
+                    comment_parts.append(col.description)
+                if getattr(col, "example_values", None):
+                    vals = ", ".join(f"'{v}'" for v in col.example_values[:8])
+                    comment_parts.append(f"examples: {vals}")
+                if comment_parts:
+                    schema_str += " -- " + " | ".join(comment_parts)
                 schema_str += ",\n"
             schema_str = schema_str.rstrip(",\n") + "\n);\n\n"
 
