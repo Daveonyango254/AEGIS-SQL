@@ -82,17 +82,22 @@ class SLMGenerator:
                 trust_remote_code=config.trust_remote_code,
             )
 
-            # Get torch dtype
-            torch_dtype = getattr(torch, config.torch_dtype)
+            # Resolve dtype. transformers >= 4.56 renamed the `torch_dtype`
+            # argument to `dtype` (and deprecated the old name); pick whichever
+            # the installed version accepts.
+            dtype = getattr(torch, config.torch_dtype)
+            import transformers
+            _tf_ver = tuple(int(p) for p in transformers.__version__.split(".")[:2])
+            dtype_kwarg = "dtype" if _tf_ver >= (4, 56) else "torch_dtype"
 
             # Load model
             self.model = AutoModelForCausalLM.from_pretrained(
                 config.model,
                 device_map=config.device,
-                torch_dtype=torch_dtype,
                 token=hf_token,
                 cache_dir=str(cache_dir),
                 trust_remote_code=config.trust_remote_code,
+                **{dtype_kwarg: dtype},
             )
 
             # Load LoRA adapter if specified
