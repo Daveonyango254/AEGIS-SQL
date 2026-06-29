@@ -6,6 +6,10 @@
 # ============================================================================
 language: english  # Supported: english, spanish, korean, chinese, swahili
 
+# Per-query pipeline: 'multi_agent' (the booster harness, default on aegis_feat)
+# or 'graph' (the original LangGraph pipeline, kept for A/B comparison).
+orchestrator: multi_agent
+
 # ============================================================================
 # Embedding Model Configuration (Query Planner Agent)
 # ============================================================================
@@ -117,6 +121,21 @@ verifier:
   timeout_seconds: 30  # Execution timeout per query (raised 5->30 to stop clipping slow-but-correct SQL)
   max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
   repair_on_empty: true  # Treat an executed-but-empty result as a soft fail to trigger one value-aware repair
+
+# ============================================================================
+# Multi-Agent Booster Harness (orchestrator: multi_agent)
+# ============================================================================
+# A booster, not a bottleneck: diverse multi-strategy candidates + execution-guided
+# selection + a local-model judge + bounded execution-feedback refinement. Every
+# lever is a flag so the cost<->accuracy frontier can be A/B-tested.
+agents:
+  strategies: [direct, query_plan]   # add 'divide_and_conquer' for nested/complex queries
+  candidates_per_strategy: 2         # 1 greedy + (n-1) sampled, per strategy
+  generation_temperature: 0.7        # diversity for the sampled candidates
+  refine_rounds: 1                   # bounded execution-feedback repair on the winner (0 disables)
+  judge_enabled: true                # local-model tie-break on split execution votes
+  max_judge_candidates: 4            # cap candidates shown to the judge
+  selection_timeout: 30              # per-candidate execution timeout (s) during select/refine
 
 # ============================================================================
 # Evaluation Configuration
