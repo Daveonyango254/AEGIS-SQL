@@ -60,11 +60,14 @@ llm:
 # ============================================================================
 # Privacy Configuration (DP Abstraction)
 # ============================================================================
+# NOTE: disabled for the current remote gpt-4o oracle run (measure the model, not
+# the privacy round-trip). Restore epsilon=1.0 / abstraction_enabled=true /
+# reconstruction_enabled=true for the privacy-preserving hybrid mode.
 privacy:
-  epsilon: 1.0  # ε privacy budget (0 = disable abstraction)
-  abstraction_enabled: true  # Enable DP abstraction for remote queries
+  epsilon: 0.0  # ε privacy budget (0 = disable abstraction)
+  abstraction_enabled: false  # Enable DP abstraction for remote queries
   value_aware_abstraction: true  # Abstract only value-like tokens (proper nouns/literals), never schema words like 'name'/'price'
-  reconstruction_enabled: true  # Enable reconstruction (must match abstraction_enabled)
+  reconstruction_enabled: false  # Enable reconstruction (must match abstraction_enabled)
   placeholder_vocab_size: 100  # Number of semantic placeholders in V_abs
 
   sensitivity_policy:
@@ -86,7 +89,7 @@ cost:
 router:
   threshold_complexity: 0.5  # Complexity threshold (0-1): >= threshold → REMOTE (lowered from 0.7 route ~98% to REMOTE)
   force_local: false  # Force all queries to local FSLM (overrides threshold)
-  force_remote: false  # Force all queries to remote FLLM (overrides threshold)
+  force_remote: true  # Force all queries to remote FLLM (overrides threshold) — current remote gpt-4o oracle run
   features:
     - query_token_count
     - schema_element_count
