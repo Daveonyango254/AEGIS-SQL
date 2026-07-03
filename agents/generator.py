@@ -20,23 +20,29 @@ class CandidateGeneratorAgent:
 
     def __init__(self, config) -> None:
         agents = config.agents
-        self.strategies = list(agents.strategies)
+        # Strategies are chosen per path in generate(): the specialist SLM gets
+        # direct self-consistency, the general LLM gets the CoT strategies too.
+        self.local_strategies = list(agents.local_strategies)
+        self.remote_strategies = list(agents.remote_strategies)
         self.per_strategy = agents.candidates_per_strategy
         self.temperature = agents.generation_temperature
         self.enable_cast_fix = getattr(config.slm, "enable_cast_fix", True)
 
     def generate(self, ctx) -> List[str]:
-        """Generate candidates across all enabled strategies.
+        """Generate candidates across the strategies for the active path.
 
-        For each strategy we build the strategy-specific prompt from ``ctx.gen_query``
+        Remote (general LLM) uses the CoT-inclusive ``remote_strategies``; local
+        (specialist SLM) uses ``local_strategies`` (direct self-consistency). For
+        each strategy we build the strategy-specific prompt from ``ctx.gen_query``
         (abstracted on the remote path), sample ``per_strategy`` candidates, then map
         each back to real tokens via ``ctx.reconstruct_fn`` and normalize it. Order
         is preserved and exact duplicates are dropped so identical candidates don't
         inflate the majority vote.
         """
+        strategies = self.remote_strategies if ctx.source == "llm" else self.local_strategies
         pool: List[str] = []
         seen = set()
-        for strategy in self.strategies:
+        for strategy in strategies:
             system_prompt, user_prompt = build_prompt(
                 strategy,
                 ctx.gen_query,
@@ -62,7 +68,7 @@ class CandidateGeneratorAgent:
                     pool.append(sql)
 
         logger.info(
-            f"Generator: {len(pool)} unique candidates from "
-            f"{len(self.strategies)} strategies x {self.per_strategy}"
+            f"Generator[{ctx.source}]: {len(pool)} unique candidates from "
+            f"{len(strategies)} strategies x {self.per_strategy}"
         )
         return pool

@@ -51,6 +51,7 @@ sys.modules["workflow.model_cache"] = _mc
 from aegis_types import Language, Query, RoutingDecision, Schema, SchemaElement  # noqa: E402
 from config import AEGISConfig  # noqa: E402
 from agents.context import RunContext  # noqa: E402
+from agents.generator import CandidateGeneratorAgent  # noqa: E402
 from agents.selector import SelectorAgent  # noqa: E402
 from agents.refiner import RefinerAgent  # noqa: E402
 from agents.orchestrator import MultiAgentOrchestrator  # noqa: E402
@@ -80,6 +81,28 @@ def _ctx(db_path, generate_fn=None, config=None):
         generate_fn=generate_fn or (lambda p, n, t, sp: []),
         reconstruct_fn=lambda s: s, recon_map=None, expose_keys=True,
     )
+
+
+# --- generator: model-aware strategies ---------------------------------------
+
+def test_generator_model_aware_strategies():
+    """Local path uses direct only (system_prompt None); remote adds a CoT strategy."""
+    cfg = AEGISConfig()
+    agent = CandidateGeneratorAgent(cfg)
+    seen = []
+
+    def gen(prompt, n, temperature, system_prompt):
+        seen.append(system_prompt)
+        return ["SELECT x FROM t"]
+
+    local = _ctx(None, gen, cfg); local.source = "slm"
+    seen.clear(); agent.generate(local)
+    assert seen == [None]                    # direct only => default system prompt
+
+    remote = _ctx(None, gen, cfg); remote.source = "llm"
+    seen.clear(); agent.generate(remote)
+    assert None in seen and any(s for s in seen)   # direct + query_plan (CoT) present
+    assert len(seen) == 2
 
 
 # --- selector ----------------------------------------------------------------

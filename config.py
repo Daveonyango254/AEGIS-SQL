@@ -240,10 +240,18 @@ class AgentsConfig(BaseModel):
     refine round.
     """
 
-    strategies: List[str] = Field(
+    # Strategies are model-aware: the local SLM is a SQL specialist (CscSQL/
+    # CSC-SQL) trained for direct generation, so it gets execution-guided
+    # self-consistency over `direct`; chain-of-thought tends to hurt it and adds
+    # latency. The remote LLM is a general reasoner, so it gets the CoT strategies.
+    local_strategies: List[str] = Field(
+        default=["direct"],
+        description="Strategies on the LOCAL SLM path (specialist => direct self-consistency)",
+    )
+    remote_strategies: List[str] = Field(
         default=["direct", "query_plan"],
-        description="Reasoning strategies for candidate diversity: any of "
-        "'direct', 'query_plan', 'divide_and_conquer'",
+        description="Strategies on the REMOTE LLM path (general reasoner => add CoT). "
+        "Any of 'direct', 'query_plan', 'divide_and_conquer'",
     )
     candidates_per_strategy: int = Field(
         default=2, description="Candidates sampled per strategy (1 greedy + rest sampled)"
@@ -264,7 +272,7 @@ class AgentsConfig(BaseModel):
         default=30, description="Per-candidate execution timeout (seconds) during selection/refine"
     )
 
-    @field_validator("strategies")
+    @field_validator("local_strategies", "remote_strategies")
     @classmethod
     def validate_strategies(cls, v: List[str]) -> List[str]:
         allowed = {"direct", "query_plan", "divide_and_conquer"}
