@@ -48,6 +48,10 @@ class LLMFallback:
         self.config = config
         self.provider = config.provider.lower()
         self.client = None
+        # Cumulative tokens billed across all calls on this instance. The cache
+        # hands out a fresh LLMFallback per query, so the multi-agent orchestrator
+        # can read this after generating N candidates to compute the query's cost.
+        self.total_tokens = 0
 
         if self.provider == "openai":
             self.client = openai.Client(api_key=config.api_key)
@@ -128,8 +132,44 @@ class LLMFallback:
             token_usage=token_usage,
         )
 
+    def complete(
+        self,
+        prompt: str,
+        n: int = 1,
+        temperature: Optional[float] = None,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ) -> List[str]:
+        """Model-agnostic completion from a prebuilt prompt (booster interface).
+
+        Mirrors ``SLMGenerator.complete``: one greedy decode plus ``n-1``
+        temperature samples, returning finalized SQL strings. Each call's tokens
+        accumulate in ``self.total_tokens`` for cost accounting. Used by the
+        multi-agent generator so the remote path runs the same reasoning
+        strategies as the local path. Returns ``[]`` on persistent API failure.
+        """
+        max_tokens = max_tokens or self.config.max_tokens
+        sample_temp = (
+            temperature if temperature is not None else self.config.temperature
+        )
+        caller = (
+            self._call_openai if self.provider == "openai" else self._call_anthropic
+        )
+        # Temperatures: first candidate greedy (0.0), the rest sampled for diversity.
+        temps = [0.0] + [max(sample_temp, 0.5)] * (n - 1) if n > 1 else [0.0]
+        out: List[str] = []
+        for t in temps:
+            try:
+                sql_text, _ = caller(prompt, max_tokens, t, system_prompt=system_prompt)
+                if sql_text and sql_text.strip():
+                    out.append(sql_text.strip())
+            except Exception as e:  # one bad sample shouldn't kill the pool
+                logger.warning(f"LLM complete() sample failed: {e}")
+        return out
+
     def _call_openai(
-        self, prompt: str, max_tokens: int, temperature: float
+        self, prompt: str, max_tokens: int, temperature: float,
+        system_prompt: Optional[str] = None,
     ) -> tuple:
         """Call OpenAI API with retry logic.
 
@@ -146,17 +186,14 @@ class LLMFallback:
         last_error = None
         for attempt in range(self.config.max_retries):
             try:
-                # Get system prompt from template
-                prompt_mgr = get_prompt_manager()
-                system_prompt = prompt_mgr.get_llm_system_prompt("openai")
+                # Use the caller-supplied system prompt (booster strategies) or the
+                # default template system prompt.
+                system = system_prompt or get_prompt_manager().get_llm_system_prompt("openai")
 
                 response = self.client.chat.completions.create(
                     model=self.config.model,
                     messages=[
-                        {
-                            "role": "system",
-                            "content": system_prompt,
-                        },
+                        {"role": "system", "content": system},
                         {"role": "user", "content": prompt},
                     ],
                     max_tokens=max_tokens,
@@ -166,6 +203,7 @@ class LLMFallback:
                 sql_text = response.choices[0].message.content.strip()
                 usage = getattr(response, "usage", None)
                 total_tokens = getattr(usage, "total_tokens", 0) or 0
+                self.total_tokens += total_tokens
                 return self._extract_sql_from_output(sql_text), total_tokens
 
             except (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError) as e:
@@ -187,7 +225,8 @@ class LLMFallback:
         raise last_error
 
     def _call_anthropic(
-        self, prompt: str, max_tokens: int, temperature: float
+        self, prompt: str, max_tokens: int, temperature: float,
+        system_prompt: Optional[str] = None,
     ) -> tuple:
         """Call Anthropic API with retry logic.
 
@@ -204,19 +243,16 @@ class LLMFallback:
         last_error = None
         for attempt in range(self.config.max_retries):
             try:
-                # Get system prompt from template
-                prompt_mgr = get_prompt_manager()
-                system_prompt = prompt_mgr.get_llm_system_prompt("anthropic")
+                # Use the caller-supplied system prompt (booster strategies) or the
+                # default template system prompt.
+                system = system_prompt or get_prompt_manager().get_llm_system_prompt("anthropic")
 
                 response = self.client.messages.create(
                     model=self.config.model,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     messages=[
-                        {
-                            "role": "user",
-                            "content": f"{system_prompt} {prompt}",
-                        }
+                        {"role": "user", "content": f"{system} {prompt}"}
                     ],
                     timeout=self.config.timeout,
                 )
@@ -225,6 +261,7 @@ class LLMFallback:
                 total_tokens = (
                     getattr(usage, "input_tokens", 0) or 0
                 ) + (getattr(usage, "output_tokens", 0) or 0)
+                self.total_tokens += total_tokens
                 return self._extract_sql_from_output(sql_text), total_tokens
 
             except (anthropic.RateLimitError, anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
