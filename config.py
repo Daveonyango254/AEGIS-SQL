@@ -231,6 +231,47 @@ class VerifierConfig(BaseModel):
     )
 
 
+class RagConfig(BaseModel):
+    """Multi-step retrieval (RAG v2) configuration.
+
+    The pipeline decomposes the question, retrieves per sub-query, fuses the
+    rankings (RRF), grounds literals against the database (value retrieval),
+    applies an FK-aware adaptive schema budget, and optionally re-ranks with
+    ColBERT. Every stage is a flag so the retrieval design is ablatable.
+    """
+
+    multi_step: bool = Field(
+        default=True, description="Use the multi-step pipeline (False = legacy single-shot top-k)"
+    )
+    per_query_top_k: int = Field(
+        default=40, description="Columns retrieved per sub-query before fusion"
+    )
+    max_sub_queries: int = Field(
+        default=6, description="Cap on decomposed sub-queries (bounds retrieval cost)"
+    )
+    max_rounds: int = Field(
+        default=2, description="Retrieval rounds; round 2 relaxes matching for uncovered entities"
+    )
+    max_tables: int = Field(
+        default=4, description="Evidence-table budget (FK bridge tables may exceed it)"
+    )
+    per_table_columns: int = Field(
+        default=10, description="Column budget per kept table (keys + value hits always kept)"
+    )
+    value_retrieval: bool = Field(
+        default=True, description="Probe the DB to locate question literals in columns"
+    )
+    max_value_probes: int = Field(
+        default=200, description="LIKE-probe budget per query (cost bound)"
+    )
+    table_cards: bool = Field(
+        default=True, description="Use table-summary card evidence during fusion"
+    )
+    rerank: bool = Field(
+        default=True, description="ColBERT re-rank of the final slice (same BGE-M3 model)"
+    )
+
+
 class AgentsConfig(BaseModel):
     """Multi-agent booster harness configuration.
 
@@ -263,10 +304,20 @@ class AgentsConfig(BaseModel):
         default=1, description="Bounded execution-feedback repair rounds on the winner (0 disables)"
     )
     judge_enabled: bool = Field(
-        default=True, description="Use the local model to break split execution votes (CHASE-SQL selector)"
+        default=True, description="Use a judge model to break split execution votes (CHASE-SQL selector)"
+    )
+    judge_model: str = Field(
+        default="auto",
+        description="Judge model: 'local' (trusted SLM, zero leakage), 'remote', or "
+        "'auto' (remote only when DP abstraction is disabled)",
     )
     max_judge_candidates: int = Field(
         default=4, description="Cap on candidates shown to the selection judge"
+    )
+    cot_max_tokens: int = Field(
+        default=1024,
+        description="Decode budget for chain-of-thought strategies (reasoning + SQL; "
+        "the 512 default truncated CoT answers mid-fence)",
     )
     selection_timeout: int = Field(
         default=30, description="Per-candidate execution timeout (seconds) during selection/refine"
@@ -391,6 +442,7 @@ class AEGISConfig(BaseSettings):
     ambiguity: AmbiguityConfig = Field(default_factory=AmbiguityConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    rag: RagConfig = Field(default_factory=RagConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

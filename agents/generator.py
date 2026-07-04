@@ -26,6 +26,9 @@ class CandidateGeneratorAgent:
         self.remote_strategies = list(agents.remote_strategies)
         self.per_strategy = agents.candidates_per_strategy
         self.temperature = agents.generation_temperature
+        # CoT strategies reason before emitting SQL; the default 512-token budget
+        # truncated the final ```sql block mid-fence on complex queries.
+        self.cot_max_tokens = getattr(agents, "cot_max_tokens", 1024)
         self.enable_cast_fix = getattr(config.slm, "enable_cast_fix", True)
 
     def generate(self, ctx) -> List[str]:
@@ -51,8 +54,11 @@ class CandidateGeneratorAgent:
                 expose_keys=ctx.expose_keys,
             )
             try:
+                # Reasoning strategies get a larger decode budget than direct ones.
+                max_tokens = self.cot_max_tokens if strategy != "direct" else None
                 raw = ctx.generate_fn(
-                    user_prompt, self.per_strategy, self.temperature, system_prompt
+                    user_prompt, self.per_strategy, self.temperature, system_prompt,
+                    max_tokens,
                 )
             except Exception as e:
                 logger.warning(f"Generator: strategy '{strategy}' failed ({e})")

@@ -249,14 +249,20 @@ class SLMGenerator:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
+        raw: bool = False,
     ) -> List[str]:
         """Model-agnostic completion from a prebuilt prompt (booster interface).
 
         Returns up to ``n`` finalized SQL strings: one greedy decode plus
         ``n-1`` temperature samples. Used by the multi-agent generator to drive
         arbitrary reasoning strategies through the same model plumbing as
-        ``generate_candidates``. Returns ``[]`` if the model is unavailable so the
-        caller can fall back to other strategies.
+        ``generate_candidates``.
+
+        ``raw=True`` skips SQL extraction and returns the decoded text verbatim —
+        required for non-SQL replies such as the selection judge's candidate
+        index (a bare "2" has no SELECT, so the extractor reduced it to "" and
+        the judge silently never fired). Returns ``[]`` if the model is
+        unavailable so the caller can fall back.
         """
         max_tokens = max_tokens or self.config.max_tokens
         temperature = (
@@ -280,6 +286,8 @@ class SLMGenerator:
                     inputs, max_tokens=max_tokens, do_sample=True,
                     temperature=temperature, num_return_sequences=n - 1,
                 ))
+            if raw:
+                return [t.strip() for t in texts if t and t.strip()]
             return [s for s in (self._finalize(t) for t in texts) if s]
         except Exception as e:
             logger.error(f"SLM complete() failed: {e}")
@@ -446,92 +454,19 @@ class SLMGenerator:
         )
 
     def _extract_sql_from_output(self, output: str, prompt: str) -> str:
-        """Extract SQL from model output.
+        """Extract SQL from model output via the shared extractor.
 
-        The model generates SQL first, then may add explanations. We extract just the SQL.
+        Delegates to :func:`generator.sql_postprocess.extract_sql` so the SLM and
+        LLM paths handle fenced blocks, reasoning-then-SQL, and truncated fences
+        identically.
 
         Args:
             output: Raw model output
-            prompt: Original prompt (not used since we already stripped it)
-
-        Returns:
-            Extracted SQL query string
+            prompt: Original prompt (unused; new tokens are already isolated)
         """
-        sql = output.strip()
+        from generator.sql_postprocess import extract_sql
 
-        # Strip any surrounding markdown code fences (leading ```sql/``` and
-        # everything after a closing ```), otherwise a trailing fence leaks into
-        # the SQL and fails grammar verification.
-        if sql.startswith("```sql"):
-            sql = sql[6:]
-        elif sql.startswith("```"):
-            sql = sql[3:]
-        if "```" in sql:
-            sql = sql.split("```", 1)[0]
-        sql = sql.strip()
-
-        # Priority 1: Extract from ```sql ... ``` code blocks
-        if "```sql" in sql:
-            start = sql.find("```sql") + 6
-            end = sql.find("```", start)
-            if end != -1:
-                result = sql[start:end].strip()
-                logger.debug(f"Extracted from ```sql block")
-                return result
-
-        # Priority 2: SQL is at the beginning, stop at question markers
-        # The model outputs: "SELECT ... ; \nWhat is the SQL query..."
-        # We want just the "SELECT ... ;"
-        if sql.upper().startswith("SELECT"):
-            # Find the first semicolon
-            if ";" in sql:
-                # Take everything up to the first semicolon
-                sql_part = sql.split(";")[0].strip() + ";"
-
-                # Additional cleanup: stop at newline followed by "What is" or "Instructions"
-                lines = sql_part.split("\n")
-                result_lines = []
-                for line in lines:
-                    stripped = line.strip()
-                    # Stop at explanation/question markers
-                    if stripped.startswith(("What is", "Instructions:", "Note:", "Explanation:")):
-                        break
-                    if stripped:
-                        result_lines.append(stripped)
-
-                result = " ".join(result_lines)
-                # Ensure ends with semicolon
-                if not result.endswith(";"):
-                    if ";" in result:
-                        result = result.split(";")[0].strip() + ";"
-
-                logger.debug(f"Extracted SQL from beginning")
-                return result
-
-        # Priority 3: Search for SQL statement in the output
-        lines = sql.split("\n")
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "WITH")):
-                # Found SQL start, collect until semicolon
-                sql_lines = [stripped]
-                j = i + 1
-                while j < len(lines):
-                    next_line = lines[j].strip()
-                    # Stop at explanations
-                    if next_line.startswith(("What is", "Instructions:", "Note:", "Explanation:")):
-                        break
-                    if next_line:
-                        sql_lines.append(next_line)
-                    if ";" in next_line:
-                        break
-                    j += 1
-
-                result = " ".join(sql_lines)
-                if ";" in result:
-                    result = result.split(";")[0].strip() + ";"
-                logger.debug(f"Extracted SQL from line search")
-                return result
-
-        logger.warning(f"Could not extract SQL from output")
-        return ""
+        sql = extract_sql(output)
+        if not sql:
+            logger.warning("Could not extract SQL from output")
+        return sql

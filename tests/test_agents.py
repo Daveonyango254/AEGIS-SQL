@@ -78,7 +78,7 @@ def _ctx(db_path, generate_fn=None, config=None):
     return RunContext(
         query=q, gen_query=q, schema=schema, schema_elements=cols, db_path=db_path,
         config=config or AEGISConfig(), source="slm",
-        generate_fn=generate_fn or (lambda p, n, t, sp: []),
+        generate_fn=generate_fn or (lambda *a, **k: []),
         reconstruct_fn=lambda s: s, recon_map=None, expose_keys=True,
     )
 
@@ -91,7 +91,7 @@ def test_generator_model_aware_strategies():
     agent = CandidateGeneratorAgent(cfg)
     seen = []
 
-    def gen(prompt, n, temperature, system_prompt):
+    def gen(prompt, n, temperature, system_prompt, max_tokens=None):
         seen.append(system_prompt)
         return ["SELECT x FROM t"]
 
@@ -144,7 +144,7 @@ def test_refiner_repairs_empty_result():
     db = _make_db()
     try:
         # Mock model: the repair attempt returns a query that yields rows.
-        gen = lambda p, n, t, sp: ["SELECT x FROM t WHERE x = 1"]
+        gen = lambda *a, **k: ["SELECT x FROM t WHERE x = 1"]
         out = RefinerAgent(AEGISConfig()).refine("SELECT x FROM t WHERE x = 999", _ctx(db, gen))
         assert out == "SELECT x FROM t WHERE x = 1"
     finally:
@@ -155,7 +155,7 @@ def test_refiner_keeps_original_when_repair_not_better():
     db = _make_db()
     try:
         # Repair also returns empty -> keep the original (never accept a worse result).
-        gen = lambda p, n, t, sp: ["SELECT x FROM t WHERE x = 888"]
+        gen = lambda *a, **k: ["SELECT x FROM t WHERE x = 888"]
         original = "SELECT x FROM t WHERE x = 999"
         out = RefinerAgent(AEGISConfig()).refine(original, _ctx(db, gen))
         assert out == original
@@ -179,7 +179,7 @@ class _FakeSLM:
         self.sql = sql
         self.calls = 0
 
-    def complete(self, prompt, n=1, temperature=None, system_prompt=None):
+    def complete(self, prompt, n=1, temperature=None, system_prompt=None, **kwargs):
         self.calls += 1
         return [self.sql]
 

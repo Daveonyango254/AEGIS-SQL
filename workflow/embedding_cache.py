@@ -37,6 +37,11 @@ CACHE_DIR = Path("cache/embeddings")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Chunk-layout version. Bump when the schema text format changes so stale
+# on-disk embeddings are re-encoded instead of silently mis-scored.
+CACHE_FORMAT = "v2-cards"
+
+
 def get_cache_path(db_id: str) -> Path:
     """Get cache directory path for a database.
 
@@ -94,12 +99,16 @@ def save_embeddings(db_id: str, retriever: SchemaRetriever) -> None:
                 json.dump(retriever.schema_texts, f, indent=2)
             logger.debug(f"Saved schema texts: {texts_path}")
 
-        # Save metadata
+        # Save metadata. "format" versions the CHUNK TEXT LAYOUT: v2 enriches
+        # column chunks with table context and appends table-summary card rows
+        # after the column rows. Caches with a different format re-encode.
         metadata = {
             "db_id": db_id,
             "timestamp": datetime.now().isoformat(),
             "model": retriever.config.model,
+            "format": CACHE_FORMAT,
             "num_columns": len(retriever.schema.columns),
+            "card_tables": getattr(retriever, "_card_tables", []),
             "embedding_dim": retriever.dense_embeddings.shape[1] if retriever.dense_embeddings is not None else None,
         }
         metadata_path = cache_path / "metadata.json"
@@ -154,6 +163,16 @@ def load_embeddings(
             )
             return None
 
+        # Validate chunk-layout format (v2 = enriched chunks + table cards).
+        # A stale format means the embedding rows don't line up with what the
+        # scorer expects -> force a re-encode rather than mis-score silently.
+        if metadata.get("format") != CACHE_FORMAT:
+            logger.warning(
+                f"Cache format mismatch for {db_id}: "
+                f"cached={metadata.get('format')}, current={CACHE_FORMAT} — re-encoding"
+            )
+            return None
+
         # Validate column count matches
         if metadata.get("num_columns") != len(schema.columns):
             logger.warning(
@@ -184,6 +203,11 @@ def load_embeddings(
         with open(texts_path, 'r') as f:
             retriever.schema_texts = json.load(f)
         logger.debug(f"Loaded schema texts: {texts_path}")
+
+        # Restore the column/table-card row boundary (skip_encoding retrievers
+        # never ran _encode_schema, so these must come from metadata).
+        retriever._num_columns = metadata.get("num_columns", len(schema.columns))
+        retriever._card_tables = metadata.get("card_tables", [])
 
         # Mark as encoded
         retriever._is_encoded = True

@@ -51,7 +51,11 @@ class LLMFallback:
         # Cumulative tokens billed across all calls on this instance. The cache
         # hands out a fresh LLMFallback per query, so the multi-agent orchestrator
         # can read this after generating N candidates to compute the query's cost.
+        # Accumulated ONLY inside _call_openai/_call_anthropic, under a lock,
+        # because complete() runs samples concurrently.
         self.total_tokens = 0
+        import threading
+        self._token_lock = threading.Lock()
 
         if self.provider == "openai":
             self.client = openai.Client(api_key=config.api_key)
@@ -139,15 +143,20 @@ class LLMFallback:
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        raw: bool = False,
     ) -> List[str]:
         """Model-agnostic completion from a prebuilt prompt (booster interface).
 
         Mirrors ``SLMGenerator.complete``: one greedy decode plus ``n-1``
-        temperature samples, returning finalized SQL strings. Each call's tokens
-        accumulate in ``self.total_tokens`` for cost accounting. Used by the
-        multi-agent generator so the remote path runs the same reasoning
-        strategies as the local path. Returns ``[]`` on persistent API failure.
+        temperature samples. Samples run CONCURRENTLY (API calls are I/O bound,
+        so wall-clock is one round trip instead of n). Each call's tokens
+        accumulate in ``self.total_tokens`` for cost accounting (guarded by a
+        lock). ``raw=True`` returns the model text verbatim — used for
+        non-SQL replies such as the selection judge's candidate index, which the
+        SQL extractor would otherwise reduce to "". Returns ``[]`` on failure.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         max_tokens = max_tokens or self.config.max_tokens
         sample_temp = (
             temperature if temperature is not None else self.config.temperature
@@ -157,19 +166,27 @@ class LLMFallback:
         )
         # Temperatures: first candidate greedy (0.0), the rest sampled for diversity.
         temps = [0.0] + [max(sample_temp, 0.5)] * (n - 1) if n > 1 else [0.0]
-        out: List[str] = []
-        for t in temps:
+
+        def one(t: float) -> Optional[str]:
             try:
-                sql_text, _ = caller(prompt, max_tokens, t, system_prompt=system_prompt)
-                if sql_text and sql_text.strip():
-                    out.append(sql_text.strip())
+                text, _ = caller(
+                    prompt, max_tokens, t, system_prompt=system_prompt, extract=not raw
+                )
+                return text.strip() if text and text.strip() else None
             except Exception as e:  # one bad sample shouldn't kill the pool
                 logger.warning(f"LLM complete() sample failed: {e}")
-        return out
+                return None
+
+        if len(temps) == 1:
+            results = [one(temps[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(len(temps), 4)) as pool:
+                results = list(pool.map(one, temps))
+        return [r for r in results if r]
 
     def _call_openai(
         self, prompt: str, max_tokens: int, temperature: float,
-        system_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None, extract: bool = True,
     ) -> tuple:
         """Call OpenAI API with retry logic.
 
@@ -203,8 +220,10 @@ class LLMFallback:
                 sql_text = response.choices[0].message.content.strip()
                 usage = getattr(response, "usage", None)
                 total_tokens = getattr(usage, "total_tokens", 0) or 0
-                self.total_tokens += total_tokens
-                return self._extract_sql_from_output(sql_text), total_tokens
+                with self._token_lock:
+                    self.total_tokens += total_tokens
+                out = self._extract_sql_from_output(sql_text) if extract else sql_text
+                return out, total_tokens
 
             except (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError) as e:
                 last_error = e
@@ -226,7 +245,7 @@ class LLMFallback:
 
     def _call_anthropic(
         self, prompt: str, max_tokens: int, temperature: float,
-        system_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None, extract: bool = True,
     ) -> tuple:
         """Call Anthropic API with retry logic.
 
@@ -261,8 +280,10 @@ class LLMFallback:
                 total_tokens = (
                     getattr(usage, "input_tokens", 0) or 0
                 ) + (getattr(usage, "output_tokens", 0) or 0)
-                self.total_tokens += total_tokens
-                return self._extract_sql_from_output(sql_text), total_tokens
+                with self._token_lock:
+                    self.total_tokens += total_tokens
+                out = self._extract_sql_from_output(sql_text) if extract else sql_text
+                return out, total_tokens
 
             except (anthropic.RateLimitError, anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
                 last_error = e
@@ -387,22 +408,13 @@ Return only the SQL query without explanation. Use proper JOINs if multiple tabl
         return prompt
 
     def _extract_sql_from_output(self, output: str) -> str:
-        """Extract SQL from LLM output.
+        """Extract SQL from LLM output via the shared extractor.
 
-        Args:
-            output: Raw LLM output
-
-        Returns:
-            Extracted SQL query string
-
-        Removes markdown code fences and extracts clean SQL.
+        Chain-of-thought strategies emit reasoning before a fenced ```sql block;
+        the previous start/end fence-strip returned the whole essay as "SQL" and
+        silently wasted every CoT candidate. The shared extractor handles fenced
+        blocks anywhere in the text plus truncated-fence fallbacks.
         """
-        # Remove code fences
-        sql = output.strip()
-        if sql.startswith("```sql"):
-            sql = sql[6:]
-        if sql.startswith("```"):
-            sql = sql[3:]
-        if sql.endswith("```"):
-            sql = sql[:-3]
-        return sql.strip()
+        from generator.sql_postprocess import extract_sql
+
+        return extract_sql(output)

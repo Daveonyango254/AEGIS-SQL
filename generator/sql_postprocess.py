@@ -141,3 +141,79 @@ def finalize_sql(sql: str, enable_cast_fix: bool = True) -> str:
     if enable_cast_fix:
         sql = apply_cast_fix(sql)
     return sql
+
+
+_SQL_BLOCK_RE = re.compile(r"```sql\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+_ANY_BLOCK_RE = re.compile(r"```\s*((?:SELECT|WITH)\b.*?)```", re.IGNORECASE | re.DOTALL)
+_SQL_START_RE = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+_EXPLANATION_STOPS = ("what is", "instructions:", "note:", "explanation:")
+
+
+def extract_sql(output: str) -> str:
+    """Extract one SQL statement from arbitrary model output.
+
+    Shared by the SLM and LLM paths so chain-of-thought responses are handled
+    identically everywhere. Precedence:
+
+    1. The LAST fenced ```sql block anywhere in the text (CoT strategies reason
+       first and emit the final query last; earlier blocks are partial snippets).
+    2. Any fenced block that starts with SELECT/WITH.
+    3. A line-scan for the last SELECT/WITH statement (handles truncated fences
+       when the model ran out of tokens mid-```).
+    4. The fence-stripped text itself if it already looks like SQL.
+
+    Returns "" when no SQL can be found (callers drop empty candidates).
+    """
+    if not output:
+        return ""
+    text = output.strip()
+
+    # 1-2. Fenced blocks, last one wins (CoT emits the final query last).
+    blocks = _SQL_BLOCK_RE.findall(text) or _ANY_BLOCK_RE.findall(text)
+    if blocks:
+        candidate = blocks[-1].strip()
+        if candidate:
+            return candidate.rstrip(";").strip() + ";" if ";" in candidate else candidate
+
+    # 3. Line-scan over statement starts. Direct outputs put the SQL first while
+    # chain-of-thought puts it last, so instead of trusting position we collect a
+    # candidate from every start and keep the most SQL-like one (a real query
+    # references a table via FROM; prose lines like "SELECT the right table"
+    # don't), breaking ties toward the LAST candidate (the CoT final answer).
+    lines = text.split("\n")
+    candidates = []
+    for i, line in enumerate(lines):
+        if not _SQL_START_RE.match(line):
+            continue
+        collected = []
+        for raw in lines[i:]:
+            stripped = raw.strip().strip("`")
+            if collected and stripped.lower().startswith(_EXPLANATION_STOPS):
+                break
+            if stripped:
+                collected.append(stripped)
+            if ";" in stripped:
+                break
+        candidate = " ".join(collected)
+        if ";" in candidate:
+            candidate = candidate.split(";")[0].strip() + ";"
+        if candidate:
+            candidates.append(candidate)
+    if candidates:
+        scored = [
+            (2 * (re.search(r"\bFROM\b", c, re.IGNORECASE) is not None)
+             + (1 if c.endswith(";") else 0), idx, c)
+            for idx, c in enumerate(candidates)
+        ]
+        scored.sort(key=lambda t: (t[0], t[1]))  # best score, then latest
+        return scored[-1][2]
+
+    # 4. Bare fence-stripped text that is already SQL.
+    bare = text
+    for fence in ("```sql", "```"):
+        if bare.startswith(fence):
+            bare = bare[len(fence):]
+    if bare.endswith("```"):
+        bare = bare[:-3]
+    bare = bare.strip()
+    return bare if _SQL_START_RE.match(bare) else ""

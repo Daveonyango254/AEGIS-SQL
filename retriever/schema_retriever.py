@@ -147,16 +147,33 @@ class SchemaRetriever:
             logger.warning("Schema has no columns to encode")
             return
 
-        # Build text descriptions for each schema element
+        # Build text descriptions for each schema element. The chunk carries its
+        # table context ("Table X, column Y") so sparse matching can hit on table
+        # names, plus the type and human description from the BIRD CSVs.
         self.schema_texts = []
         for col in self.schema.columns:
-            # Format: "table_name.column_name (type): description"
-            text = f"{col.name}"
+            table, _, column = col.name.partition(".")
+            text = f"Table {table}, column {column}" if column else col.name
             if col.data_type:
                 text += f" ({col.data_type})"
             if col.description:
                 text += f": {col.description}"
             self.schema_texts.append(text)
+
+        # Ingestion: table summary cards. One chunk per table (name + member
+        # columns) lets a question match a whole table ("orders placed by...")
+        # even when no single column embedding is close. Card rows sit AFTER the
+        # column rows; _num_columns marks the boundary.
+        self._num_columns = len(self.schema_texts)
+        self._card_tables = list(dict.fromkeys(
+            c.name.split(".", 1)[0] for c in self.schema.columns if "." in c.name
+        ))
+        for table in self._card_tables:
+            member_cols = ", ".join(
+                c.name.split(".", 1)[1] for c in self.schema.columns
+                if c.name.startswith(f"{table}.")
+            )
+            self.schema_texts.append(f"Table {table} with columns: {member_cols}")
 
         logger.debug(f"Encoding {len(self.schema_texts)} schema elements...")
 
@@ -219,6 +236,71 @@ class SchemaRetriever:
 
         return retrieved
 
+    def _column_count(self) -> int:
+        """Number of COLUMN rows in the embedding matrix (rows past this are
+        table cards). Cache-loaded retrievers get this from metadata; a safe
+        fallback assumes columns-only (legacy matrices without cards)."""
+        return getattr(self, "_num_columns", len(self.schema.columns))
+
+    def _score(self, query_text: str, use_hybrid: bool = True):
+        """Hybrid similarity of one query against ALL embedded rows.
+
+        Returns a numpy array over columns + table cards. Callers slice with
+        :meth:`_column_count` to separate the two ranges.
+        """
+        query_embeddings = self.model.encode(
+            [query_text],
+            batch_size=1,
+            max_length=self.config.max_length,
+            return_dense=True,
+            return_sparse=use_hybrid,
+            return_colbert_vecs=False,
+        )
+        if use_hybrid:
+            dense = self._compute_dense_similarity(query_embeddings["dense_vecs"][0])
+            sparse = self._compute_sparse_similarity(query_embeddings["lexical_weights"][0])
+            # BGE-M3 paper recommends 0.6/0.4 dense/sparse weighting.
+            return 0.6 * dense + 0.4 * sparse
+        return self._compute_dense_similarity(query_embeddings["dense_vecs"][0])
+
+    def retrieve_scored(self, query_text: str, top_k: int = 40):
+        """Scored column retrieval for the multi-step pipeline.
+
+        Returns ``[(SchemaElement, score), ...]`` best-first — no FK expansion,
+        no side effects. The pipeline calls this once per sub-query and fuses the
+        rankings, so the raw ordering (not just membership) matters.
+        """
+        if not self.model or self.dense_embeddings is None:
+            return []
+        try:
+            scores = self._score(query_text)[: self._column_count()]
+            order = np.argsort(scores)[::-1][:top_k]
+            return [(self.schema.columns[i], float(scores[i])) for i in order]
+        except Exception as e:
+            logger.error(f"retrieve_scored failed: {e}")
+            return []
+
+    def score_table_cards(self, query_text: str) -> Dict[str, float]:
+        """Similarity of the query to each TABLE summary card.
+
+        Whole-table evidence for the fusion stage. Empty when the matrix has no
+        card rows (legacy cache) or the model is unavailable.
+        """
+        card_tables = getattr(self, "_card_tables", [])
+        if not card_tables or not self.model or self.dense_embeddings is None:
+            return {}
+        try:
+            scores = self._score(query_text)
+            offset = self._column_count()
+            if len(scores) < offset + len(card_tables):
+                return {}
+            return {
+                table: float(scores[offset + i]) for i, table in enumerate(card_tables)
+            }
+        except Exception as e:
+            logger.debug(f"score_table_cards failed: {e}")
+            return {}
+
     def _semantic_retrieve(
         self, query: Query, top_k: int, use_hybrid: bool
     ) -> List[SchemaElement]:
@@ -243,37 +325,7 @@ class SchemaRetriever:
             return self._passthrough_retrieve(top_k)
 
         try:
-            # Encode query
-            query_text = query.text
-            logger.debug(f"Encoding query: {query_text[:80]}...")
-
-            query_embeddings = self.model.encode(
-                [query_text],
-                batch_size=1,
-                max_length=self.config.max_length,
-                return_dense=True,
-                return_sparse=use_hybrid,
-                return_colbert_vecs=False,
-            )
-
-            # Compute similarity scores
-            if use_hybrid:
-                # Hybrid: combine dense and sparse scores
-                dense_scores = self._compute_dense_similarity(
-                    query_embeddings['dense_vecs'][0]
-                )
-                sparse_scores = self._compute_sparse_similarity(
-                    query_embeddings['lexical_weights'][0]
-                )
-
-                # Combine scores (weighted average)
-                # BGE-M3 paper recommends 0.5/0.5 or 0.6/0.4 for dense/sparse
-                scores = 0.6 * dense_scores + 0.4 * sparse_scores
-            else:
-                # Dense-only retrieval
-                scores = self._compute_dense_similarity(
-                    query_embeddings['dense_vecs'][0]
-                )
+            scores = self._score(query.text, use_hybrid)[: self._column_count()]
 
             # Get top-k indices
             top_k_indices = np.argsort(scores)[::-1][:top_k]

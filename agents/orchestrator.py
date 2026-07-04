@@ -74,7 +74,9 @@ class MultiAgentOrchestrator:
         if not candidates:
             candidates = [self._fallback_candidate(ctx, query, schema_elements, schema, llm, abstracted_prompt)]
 
-        judge_fn = self._judge_fn(cache) if self.selector.judge_enabled else None
+        judge_fn = (
+            self._judge_fn(cache, remote_llm=llm) if self.selector.judge_enabled else None
+        )
         best_text, _ = self.selector.select(candidates, ctx, judge_fn=judge_fn)
         best_text = self.refiner.refine(best_text, ctx)
 
@@ -108,8 +110,11 @@ class MultiAgentOrchestrator:
         """Local path: the SLM sees raw inputs; no abstraction/reconstruction."""
         slm = get_cache().get_slm_generator()
 
-        def generate_fn(prompt, n, temperature, system_prompt):
-            return slm.complete(prompt, n=n, temperature=temperature, system_prompt=system_prompt)
+        def generate_fn(prompt, n, temperature, system_prompt, max_tokens=None):
+            return slm.complete(
+                prompt, n=n, temperature=temperature,
+                system_prompt=system_prompt, max_tokens=max_tokens,
+            )
 
         return RunContext(
             query=query, gen_query=query, schema=schema, schema_elements=schema_elements,
@@ -149,8 +154,11 @@ class MultiAgentOrchestrator:
 
         llm = get_cache().get_llm_generator()
 
-        def generate_fn(prompt, n, temperature, system_prompt):
-            return llm.complete(prompt, n=n, temperature=temperature, system_prompt=system_prompt)
+        def generate_fn(prompt, n, temperature, system_prompt, max_tokens=None):
+            return llm.complete(
+                prompt, n=n, temperature=temperature,
+                system_prompt=system_prompt, max_tokens=max_tokens,
+            )
 
         ctx = RunContext(
             query=query, gen_query=gen_query, schema=schema, schema_elements=schema_elements,
@@ -162,15 +170,46 @@ class MultiAgentOrchestrator:
 
     # -------------------------------------------------------------- fallbacks --
 
-    def _judge_fn(self, cache):
-        """The selection judge always runs on the local (trusted) model."""
+    def _judge_fn(self, cache, remote_llm=None):
+        """Build the selection-judge callable, choosing the judge model.
+
+        The judge sees the real question + reconstructed candidates, so it may
+        only run remotely when nothing sensitive is being protected. Policy
+        (``agents.judge_model``):
+          - "local":  always the trusted SLM (zero leakage — required for Theorem 1).
+          - "remote": always the remote LLM (only sensible in no-abstraction runs).
+          - "auto":   remote when DP abstraction is disabled (nothing to protect,
+                      and it avoids loading the 7B SLM on force-remote runs),
+                      local otherwise.
+        Judge replies are a bare candidate index, so ``raw=True`` skips SQL
+        extraction (which reduced "2" to "" and silently disabled the judge).
+        """
+        mode = getattr(self.config.agents, "judge_model", "auto")
+        privacy_on = (
+            self.config.privacy.abstraction_enabled and self.config.privacy.epsilon > 0
+        )
+        use_remote = remote_llm is not None and (
+            mode == "remote" or (mode == "auto" and not privacy_on)
+        )
+
+        if use_remote:
+            def judge(prompt, n, temperature, system_prompt):
+                return remote_llm.complete(
+                    prompt, n=n, temperature=temperature,
+                    system_prompt=system_prompt, raw=True,
+                )
+            return judge
+
         try:
             slm = cache.get_slm_generator()
         except Exception:
             return None
 
         def judge(prompt, n, temperature, system_prompt):
-            return slm.complete(prompt, n=n, temperature=temperature, system_prompt=system_prompt)
+            return slm.complete(
+                prompt, n=n, temperature=temperature,
+                system_prompt=system_prompt, raw=True,
+            )
 
         return judge
 

@@ -29,13 +29,29 @@ class SchemaLinkerAgent:
             db_path: SQLite path for value grounding (skipped if absent/in-memory).
         """
         slm = self.config.slm
+        rag = getattr(self.config, "rag", None)
 
         # Full-schema mode inlines every column when the DB is small enough;
-        # otherwise use top-k hybrid retrieval + FK closure (the stable baseline).
+        # multi-step RAG (decompose -> fuse -> value-ground -> budget) is the
+        # default; legacy single-shot top-k + FK closure remains the A/B control.
         all_columns = [c for c in schema.columns if "." in c.name]
+        used_pipeline = False
         if slm.full_schema and 0 < len(all_columns) <= slm.full_schema_max_columns:
             schema_elements = list(all_columns)
             logger.info(f"SchemaLinker: full schema ({len(schema_elements)} columns)")
+        elif rag is not None and rag.multi_step:
+            from retriever.pipeline import MultiStepRetriever
+
+            pipeline = MultiStepRetriever(retriever, schema, self.config)
+            schema_elements = pipeline.retrieve(query, db_path)
+            used_pipeline = bool(schema_elements)
+            if not schema_elements:  # pass-through/model-less fallback
+                schema_elements = retriever.retrieve(
+                    query,
+                    top_k=slm.retrieval_top_k,
+                    expand_foreign_keys=True,
+                    max_expanded_tables=slm.max_expanded_tables,
+                )
         else:
             schema_elements = retriever.retrieve(
                 query,
@@ -46,15 +62,31 @@ class SchemaLinkerAgent:
 
         # Value grounding: attach sampled DB values to text columns so the model
         # uses real literals (e.g. 'Continuation School', not 'Continuation').
+        # IMPORTANT: the retriever returns the CACHED schema's element objects,
+        # shared across queries — mutate copies (dataclasses.replace), never the
+        # originals, or one query's value hints leak into the next query's prompt.
         if slm.enable_value_grounding and db_path and db_path != ":memory:":
             try:
+                from dataclasses import replace
+
                 from retriever.value_sampler import get_value_hints
 
                 hints = get_value_hints(db_path, schema_elements, query.text)
-                for elem in schema_elements:
-                    vals = hints.get(elem.name)
-                    if vals:
-                        elem.example_values = vals
+                if used_pipeline:
+                    # The pipeline attached EXACT stored literals from value
+                    # retrieval — higher fidelity than sampled hints, so grounding
+                    # only fills columns that have no values yet.
+                    schema_elements = [
+                        replace(e, example_values=hints[e.name])
+                        if not e.example_values and e.name in hints else e
+                        for e in schema_elements
+                    ]
+                else:
+                    # Legacy semantics: query-linked hints replace stale examples.
+                    schema_elements = [
+                        replace(e, example_values=hints.get(e.name, e.example_values))
+                        for e in schema_elements
+                    ]
             except Exception as e:  # value grounding is best-effort, never fatal
                 logger.warning(f"SchemaLinker: value grounding skipped ({e})")
 
