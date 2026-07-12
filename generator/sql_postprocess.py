@@ -143,6 +143,7 @@ def finalize_sql(sql: str, enable_cast_fix: bool = True) -> str:
     return sql
 
 
+_ANSWER_TAG_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
 _SQL_BLOCK_RE = re.compile(r"```sql\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 _ANY_BLOCK_RE = re.compile(r"```\s*((?:SELECT|WITH)\b.*?)```", re.IGNORECASE | re.DOTALL)
 _SQL_START_RE = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
@@ -167,6 +168,18 @@ def extract_sql(output: str) -> str:
     if not output:
         return ""
     text = output.strip()
+
+    # 0. <answer>SELECT …</answer> tags — the CscSQL GRPO checkpoints' native
+    # output format (reasoning lives in <think> tags before it). Last one wins.
+    answers = _ANSWER_TAG_RE.findall(text)
+    if answers:
+        candidate = answers[-1].strip()
+        # The tag body may itself be fenced; strip one level.
+        inner = _SQL_BLOCK_RE.findall(candidate)
+        if inner:
+            candidate = inner[-1].strip()
+        if candidate:
+            return candidate
 
     # 1-2. Fenced blocks, last one wins (CoT emits the final query last).
     blocks = _SQL_BLOCK_RE.findall(text) or _ANY_BLOCK_RE.findall(text)

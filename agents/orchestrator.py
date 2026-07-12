@@ -1,239 +1,285 @@
-"""MultiAgentOrchestrator — the booster pipeline and drop-in for ``graph.invoke``.
+"""AEGIS v1 orchestrator — accuracy-first corrective self-consistency pipeline.
 
-Wires the agents into the paper's skeleton and returns the exact result dict the
-evaluation harness expects, so results/logs are collected identically:
+    Schema stage (recall-first)            [agents/schema_linker.py]
+      └─> Candidate pool (mode-dependent, parallel)
+            local:  CSC GRPO generator, native OmniSQL prompt, n samples
+            remote: LLM, direct + query-plan strategies, n samples each
+      └─> Execution-vote grouping over the POOLED candidates    [generator/csc.py]
+      └─> CSC merge-revision on the top-2 disagreeing groups (the merge
+          checkpoint's trained skill) → re-vote
+      └─> Judge tie-break (equal-vote groups, judge model configurable)
+      └─> Bounded revision-based refine (error/empty results only)
+      └─> Reviewer: 3-stage verification                        [agents/reviewer.py]
 
-    SchemaLinker -> Router -> [ LOCAL: SLM | REMOTE: abstract -> LLM -> reconstruct ]
-                 -> Generate (multi-strategy) -> Select -> Refine -> Review
-
-Reuses the cached models (no reloads), the content-independent router, the DP
-abstraction layer, and the 3-stage verifier. Privacy is preserved: on the remote
-path the model only ever sees abstracted text, candidates are reconstructed inside
-the trust boundary, and the optional selection judge runs on the local model.
+Returns the exact prediction-contract dict the evaluation harness has always
+consumed, so results/logs stay comparable across branches. Cost and privacy are
+ISOLATED here: no router, no DP abstraction (both parked in the repo untouched);
+per-query cost is still reported (fixed local cost + token-billed remote).
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from loguru import logger
 
-from aegis_types import SQL, Query, RoutingDecision
-from workflow.costing import compute_cost
+from aegis_types import SQL, RoutingDecision
+from generator.csc import VoteGroup, csc_select, group_by_execution
+from generator.sql_postprocess import finalize_sql
+from prompts import omnisql
+from prompts.schema_render import render_schema_ddl
+from prompts.sql_strategies import build_judge_prompt, build_prompt
 from workflow.model_cache import get_cache
 
-from agents.context import RunContext
-from agents.schema_linker import SchemaLinkerAgent
-from agents.generator import CandidateGeneratorAgent
-from agents.selector import SelectorAgent
-from agents.refiner import RefinerAgent
-from agents.reviewer import ReviewerAgent
+# Reporting constants (cost is isolated, not optimized — still recorded).
+REMOTE_TOKEN_COST_USD = 1.5e-05
+LOCAL_COMPUTE_COST_USD = 1e-04
 
 
 class MultiAgentOrchestrator:
-    """Run a single query through the multi-agent booster harness."""
+    """Run one query through the v1 pipeline; ``run()`` is the eval entry point."""
 
     def __init__(self, config) -> None:
+        from agents.reviewer import ReviewerAgent
+        from agents.schema_linker import SchemaLinkerAgent
+
         self.config = config
+        self.mode = config.mode
         self.linker = SchemaLinkerAgent(config)
-        self.generator = CandidateGeneratorAgent(config)
-        self.selector = SelectorAgent(config)
-        self.refiner = RefinerAgent(config)
         self.reviewer = ReviewerAgent(config)
-        self.expose_keys = getattr(config.slm, "expose_keys", True)
+        if config.models.generator == config.models.merger:
+            logger.warning(
+                "models.generator == models.merger: one checkpoint will serve both "
+                "roles (off its trained distribution for one of them)"
+            )
+
+    # ------------------------------------------------------------------ main --
 
     def run(self, initial_state: dict) -> dict:
-        """Process one query; return the prediction-contract dict."""
         query = initial_state["query"]
         schema = initial_state["schema"]
         db_path = initial_state.get("db_path")
         db_id = initial_state.get("database_id") or getattr(query, "database_id", "")
-
         cache = get_cache()
 
-        # --- Query Planner: schema linking -------------------------------------
+        # --- Schema stage ------------------------------------------------------
         retriever = cache.get_schema_retriever(db_id, schema)
-        schema_elements, retrieved_tables, num_columns = self.linker.link(
-            retriever, query, schema, db_path
-        )
+        elements, tables, num_columns = self.linker.link(retriever, query, schema, db_path)
+        db_details = omnisql.build_db_details(schema, elements)
 
-        # --- Content-Independent Router ---------------------------------------
-        route = cache.get_router().route(query, schema_elements)
+        # --- Candidate pool ----------------------------------------------------
+        pool: List[str] = []
+        llm = None
+        if self.mode in ("local", "ensemble"):
+            pool += self._local_candidates(cache, query, db_details)
+        if self.mode in ("remote", "ensemble") and self.config.generation.remote_candidates > 0:
+            llm = cache.get_llm_generator()
+            pool += self._remote_candidates(llm, query, elements, schema)
 
-        # --- Build the path-specific generation context ------------------------
-        if route == RoutingDecision.REMOTE:
-            ctx, llm, abstracted_prompt = self._remote_context(
-                query, schema, schema_elements, db_path
-            )
-        else:
-            ctx, abstracted_prompt = self._local_context(
-                query, schema, schema_elements, db_path
-            ), None
-            llm = None
+        pool = self._dedupe(pool)
+        if not pool:
+            logger.error("Orchestrator: empty candidate pool; emitting trivial query")
+            pool = [self._trivial(elements)]
 
-        # --- Generate -> Select -> Refine --------------------------------------
-        candidates = self.generator.generate(ctx)
-        if not candidates:
-            candidates = [self._fallback_candidate(ctx, query, schema_elements, schema, llm, abstracted_prompt)]
+        # --- CSC selection: vote -> merge-revise -> re-vote ---------------------
+        timeout = self.config.selection.timeout_seconds
+        merge_fn = self._merge_fn(cache, query, schema) if self.config.csc.enabled else None
+        best = csc_select(pool, db_path, merge_fn=merge_fn, timeout=timeout)
 
-        judge_fn = (
-            self._judge_fn(cache, remote_llm=llm) if self.selector.judge_enabled else None
-        )
-        best_text, _ = self.selector.select(candidates, ctx, judge_fn=judge_fn)
-        best_text = self.refiner.refine(best_text, ctx)
+        # --- Judge tie-break (equal top votes and CSC didn't adjudicate) --------
+        best = self._judge_tiebreak(cache, llm, query, elements, schema, pool, best, db_path)
 
-        sql = SQL(text=best_text, dialect="sqlite", source=ctx.source, verified=False)
+        # --- Bounded refine (revision prompt on error/empty results) ------------
+        best = self._refine(cache, query, schema, best, db_path)
 
-        # --- Reviewer: 3-stage verification ------------------------------------
+        sql = SQL(text=best, dialect="sqlite", source=self._source(), verified=False)
         verification_result = self.reviewer.review(sql, schema, db_path)
 
-        # --- Cost (token-billed remote, fixed local) ---------------------------
-        ccfg = self.config.cost
-        if ctx.source == "llm" and llm is not None:
-            cost = compute_cost("llm", llm.total_tokens, ccfg.remote_token_cost, ccfg.local_compute_cost)
-        else:
-            cost = compute_cost("slm", 0, ccfg.remote_token_cost, ccfg.local_compute_cost)
+        cost = LOCAL_COMPUTE_COST_USD if self.mode != "remote" else 0.0
+        if llm is not None:
+            cost += llm.total_tokens * REMOTE_TOKEN_COST_USD
 
         return {
             "sql": sql,
-            "routing_decision": route,
-            "abstracted_prompt": abstracted_prompt,
+            "routing_decision": self._route(),
+            "abstracted_prompt": None,   # privacy isolated in v1
             "verification_result": verification_result,
-            "generation_source": ctx.source,
-            "retrieved_tables": retrieved_tables,
+            "generation_source": self._source(),
+            "retrieved_tables": tables,
             "num_retrieved_columns": num_columns,
             "cost_usd": cost,
-            "privacy_loss": 0.0,  # aggregate ℒ_priv is computed offline by metrics.py
+            "privacy_loss": 0.0,
         }
 
-    # ------------------------------------------------------------------ paths --
+    # ------------------------------------------------------------- generation --
 
-    def _local_context(self, query, schema, schema_elements, db_path) -> RunContext:
-        """Local path: the SLM sees raw inputs; no abstraction/reconstruction."""
-        slm = get_cache().get_slm_generator()
+    def _local_candidates(self, cache, query, db_details: str) -> List[str]:
+        """Sample n candidates from the GRPO generator with its native prompt."""
+        gen = cache.get_slm(self.config.models.generator)
+        prompt = omnisql.build_generation_prompt(
+            query.text, getattr(query, "evidence", "") or "", db_details
+        )
+        raw = gen.complete(
+            prompt,
+            n=self.config.generation.local_candidates,
+            temperature=self.config.generation.temperature,
+            max_tokens=self.config.generation.max_tokens,
+        )
+        out = [finalize_sql(r) for r in raw]
+        logger.info(f"Orchestrator: {len(out)} local candidates")
+        return [o for o in out if o]
 
-        def generate_fn(prompt, n, temperature, system_prompt, max_tokens=None):
-            return slm.complete(
-                prompt, n=n, temperature=temperature,
-                system_prompt=system_prompt, max_tokens=max_tokens,
+    def _remote_candidates(self, llm, query, elements, schema) -> List[str]:
+        """Sample candidates from the remote LLM across its reasoning strategies."""
+        gcfg = self.config.generation
+        out: List[str] = []
+        for strategy in gcfg.remote_strategies:
+            system_prompt, user_prompt = build_prompt(
+                strategy, query, elements, schema=schema, expose_keys=True
             )
-
-        return RunContext(
-            query=query, gen_query=query, schema=schema, schema_elements=schema_elements,
-            db_path=db_path, config=self.config, route=RoutingDecision.LOCAL, source="slm",
-            generate_fn=generate_fn, reconstruct_fn=lambda s: s, recon_map=None,
-            expose_keys=self.expose_keys,
-        )
-
-    def _remote_context(self, query, schema, schema_elements, db_path):
-        """Remote path: abstract the query, generate on the LLM, reconstruct candidates."""
-        from abstraction.dp_abstractor import DPAbstractor
-        from abstraction.placeholder_vocab import PlaceholderVocabulary
-        from abstraction.sensitivity_policy import SensitivityPolicy
-        from abstraction.reconstruction import ReconstructionModule
-
-        pcfg = self.config.privacy
-        vocab = PlaceholderVocabulary(vocab_size=pcfg.placeholder_vocab_size)
-        policy = SensitivityPolicy(pcfg.sensitivity_policy)
-        abstractor = DPAbstractor(pcfg, vocab, policy, embedding_model=None)
-        abstracted_prompt, recon_map = abstractor.abstract(query, schema_elements)
-
-        # Prompts are built from the abstracted text so no sensitive value leaves
-        # the trust boundary; reconstruction restores real tokens for execution.
-        gen_query = Query(
-            text=abstracted_prompt.text, language=query.language,
-            database_id=query.database_id,
-            evidence=abstracted_prompt.evidence or getattr(query, "evidence", ""),
-        )
-
-        recon = ReconstructionModule()
-        recon.register_map("q", recon_map)
-
-        def reconstruct_fn(text: str) -> str:
-            return recon.reconstruct(
-                SQL(text=text, dialect="sqlite", source="llm", verified=False), "q"
-            ).text
-
-        llm = get_cache().get_llm_generator()
-
-        def generate_fn(prompt, n, temperature, system_prompt, max_tokens=None):
-            return llm.complete(
-                prompt, n=n, temperature=temperature,
-                system_prompt=system_prompt, max_tokens=max_tokens,
-            )
-
-        ctx = RunContext(
-            query=query, gen_query=gen_query, schema=schema, schema_elements=schema_elements,
-            db_path=db_path, config=self.config, route=RoutingDecision.REMOTE, source="llm",
-            generate_fn=generate_fn, reconstruct_fn=reconstruct_fn, recon_map=recon_map,
-            expose_keys=self.expose_keys,
-        )
-        return ctx, llm, abstracted_prompt
-
-    # -------------------------------------------------------------- fallbacks --
-
-    def _judge_fn(self, cache, remote_llm=None):
-        """Build the selection-judge callable, choosing the judge model.
-
-        The judge sees the real question + reconstructed candidates, so it may
-        only run remotely when nothing sensitive is being protected. Policy
-        (``agents.judge_model``):
-          - "local":  always the trusted SLM (zero leakage — required for Theorem 1).
-          - "remote": always the remote LLM (only sensible in no-abstraction runs).
-          - "auto":   remote when DP abstraction is disabled (nothing to protect,
-                      and it avoids loading the 7B SLM on force-remote runs),
-                      local otherwise.
-        Judge replies are a bare candidate index, so ``raw=True`` skips SQL
-        extraction (which reduced "2" to "" and silently disabled the judge).
-        """
-        mode = getattr(self.config.agents, "judge_model", "auto")
-        privacy_on = (
-            self.config.privacy.abstraction_enabled and self.config.privacy.epsilon > 0
-        )
-        use_remote = remote_llm is not None and (
-            mode == "remote" or (mode == "auto" and not privacy_on)
-        )
-
-        if use_remote:
-            def judge(prompt, n, temperature, system_prompt):
-                return remote_llm.complete(
-                    prompt, n=n, temperature=temperature,
-                    system_prompt=system_prompt, raw=True,
+            try:
+                raw = llm.complete(
+                    user_prompt,
+                    n=gcfg.remote_candidates,
+                    temperature=gcfg.temperature,
+                    system_prompt=system_prompt,
+                    max_tokens=gcfg.max_tokens,
                 )
-            return judge
+            except Exception as e:
+                logger.warning(f"Orchestrator: remote strategy '{strategy}' failed ({e})")
+                continue
+            out += [finalize_sql(r) for r in raw if r]
+        logger.info(f"Orchestrator: {len(out)} remote candidates")
+        return [o for o in out if o]
 
-        try:
-            slm = cache.get_slm_generator()
-        except Exception:
-            return None
+    # -------------------------------------------------------------- csc stages --
 
-        def judge(prompt, n, temperature, system_prompt):
-            return slm.complete(
-                prompt, n=n, temperature=temperature,
-                system_prompt=system_prompt, raw=True,
+    def _merge_fn(self, cache, query, schema):
+        """Build the merge-revision callable for csc_select (loads merger lazily)."""
+
+        def merge(groups: List[VoteGroup]) -> List[str]:
+            merger = cache.get_slm(self.config.models.merger)
+            candidates = [
+                (g.sql, list(g.result) if g.result is not None else None) for g in groups
+            ]
+            prompt = omnisql.build_merge_prompt(
+                query.text, getattr(query, "evidence", "") or "", schema, candidates
             )
+            raw = merger.complete(
+                prompt,
+                n=self.config.csc.merge_candidates,
+                temperature=self.config.generation.temperature,
+                max_tokens=self.config.generation.max_tokens,
+            )
+            return [finalize_sql(r) for r in raw if r]
 
-        return judge
+        return merge
 
-    def _fallback_candidate(self, ctx, query, schema_elements, schema, llm, abstracted_prompt) -> str:
-        """If every strategy returned nothing, fall back to the proven single-shot path."""
-        from generator.sql_postprocess import finalize_sql
+    def _judge_tiebreak(
+        self, cache, llm, query, elements, schema, pool, best, db_path
+    ) -> str:
+        """Break an exact vote tie between the top two result groups.
 
+        Runs only when the top-2 groups have EQUAL votes (csc's merge already
+        adjudicated genuine disagreements; the judge is the residual tie-break).
+        """
+        jcfg = self.config.selection
+        if jcfg.judge == "off" or not db_path or db_path == ":memory:":
+            return best
+        groups = [g for g in group_by_execution(pool, db_path, timeout=jcfg.timeout_seconds)
+                  if g.result is not None]
+        if len(groups) < 2 or groups[0].votes != groups[1].votes:
+            return best
+
+        top = [g.sql for g in groups[: jcfg.max_judge_candidates]]
+        schema_block, _, _ = render_schema_ddl(elements, schema=schema, expose_keys=True)
+        system_prompt, user_prompt = build_judge_prompt(query, schema_block, top)
+        judge = self._judge_model(cache, llm, jcfg.judge)
+        if judge is None:
+            return best
         try:
-            if ctx.source == "llm" and llm is not None:
-                sql = llm.generate(abstracted_prompt, schema_elements, schema=schema)
-                text = ctx.reconstruct_fn(sql.text)
-            else:
-                slm = get_cache().get_slm_generator()
-                text = slm.generate(query, schema_elements, schema=schema).text
-            return finalize_sql(text, enable_cast_fix=getattr(self.config.slm, "enable_cast_fix", True))
+            reply = judge(user_prompt, system_prompt)
         except Exception as e:
-            logger.error(f"Orchestrator fallback failed ({e}); emitting trivial query")
-            first_table = retrieved_first_table(schema_elements)
-            return f"SELECT * FROM {first_table} LIMIT 10" if first_table else "SELECT 1"
+            logger.warning(f"Orchestrator: judge failed ({e})")
+            return best
+        import re
 
+        m = re.search(r"\d+", reply or "")
+        if m and 1 <= int(m.group()) <= len(top):
+            logger.info("Orchestrator: judge broke an exact vote tie")
+            return top[int(m.group()) - 1]
+        return best
 
-def retrieved_first_table(schema_elements) -> Optional[str]:
-    """First table name in the retrieved slice (for the trivial fallback)."""
-    for elem in schema_elements:
-        if "." in elem.name:
-            return elem.name.split(".", 1)[0]
-    return None
+    def _judge_model(self, cache, llm, mode: str):
+        """Judge callable by config: remote LLM when available, else local merger."""
+        if mode in ("remote", "auto") and llm is not None:
+            return lambda p, sp: (llm.complete(p, n=1, temperature=0.0,
+                                               system_prompt=sp, raw=True) or [""])[0]
+        if mode in ("local", "auto"):
+            slm = cache.get_slm(self.config.models.merger)
+            return lambda p, sp: (slm.complete(p, n=1, temperature=0.0,
+                                               system_prompt=sp, raw=True) or [""])[0]
+        return None
+
+    def _refine(self, cache, query, schema, best: str, db_path) -> str:
+        """Revision-based repair when the winner errors or returns empty.
+
+        Uses the merge model's single-draft revision distribution: show the draft
+        + its execution outcome, ask for a corrected query, keep the revision
+        only if it strictly improves (never replace a working result).
+        """
+        rounds = self.config.refine.rounds
+        if rounds <= 0 or not best or not db_path or db_path == ":memory:":
+            return best
+        timeout = self.config.selection.timeout_seconds
+        current = best
+        for _ in range(rounds):
+            groups = group_by_execution([current], db_path, timeout=timeout)
+            g = groups[0] if groups else None
+            healthy = g is not None and g.result is not None and len(g.result) > 0
+            if healthy:
+                return current
+            rows = list(g.result) if (g and g.result is not None) else None
+            merger = cache.get_slm(self.config.models.merger)
+            prompt = omnisql.build_merge_prompt(
+                query.text, getattr(query, "evidence", "") or "", schema,
+                [(current, rows)],
+            )
+            raw = merger.complete(prompt, n=1, temperature=0.0,
+                                  max_tokens=self.config.generation.max_tokens)
+            fixed = finalize_sql(raw[0]) if raw else ""
+            if not fixed or fixed == current:
+                break
+            f_groups = group_by_execution([fixed], db_path, timeout=timeout)
+            fg = f_groups[0] if f_groups else None
+            if fg is not None and fg.result is not None and len(fg.result) > 0:
+                logger.info("Orchestrator: refine produced a clean result")
+                return fixed
+            if fg is not None and fg.result is not None and (g is None or g.result is None):
+                current = fixed  # executing beats erroring; loop may improve further
+        return current
+
+    # ---------------------------------------------------------------- helpers --
+
+    def _source(self) -> str:
+        return {"local": "slm", "remote": "llm"}.get(self.mode, "ensemble")
+
+    def _route(self) -> RoutingDecision:
+        # Reporting compatibility: 'local' maps to LOCAL; remote/ensemble involve
+        # the remote model, so they report REMOTE (privacy is isolated in v1).
+        return RoutingDecision.LOCAL if self.mode == "local" else RoutingDecision.REMOTE
+
+    @staticmethod
+    def _dedupe(pool: List[str]) -> List[str]:
+        seen, out = set(), []
+        for sql in pool:
+            key = sql.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(sql)
+        return out
+
+    @staticmethod
+    def _trivial(elements) -> str:
+        for e in elements:
+            if "." in e.name:
+                return f"SELECT * FROM {e.name.split('.', 1)[0]} LIMIT 10"
+        return "SELECT 1"

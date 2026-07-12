@@ -1,237 +1,77 @@
-# AEGIS-SQL Configuration
-# Three-Axis Constrained Optimization for Hybrid NL2SQL
+# ============================================================================
+# AEGIS v1 — accuracy-first text-to-SQL configuration
+# ----------------------------------------------------------------------------
+# Pipeline: schema stage (recall-first) -> candidate pool (local GRPO SLM and/or
+# remote LLM) -> execution-vote grouping -> CSC merge-revision (top-2 groups) ->
+# judge tie-break -> bounded refine -> 3-stage verification.
+# Cost and privacy are ISOLATED in this configuration (the paper's abstraction /
+# routing code is parked in the repo, not wired into this pipeline).
+# ============================================================================
 
-# ============================================================================
-# Language Configuration
-# ============================================================================
-language: english  # Supported: english, spanish, korean, chinese, swahili
+language: english
 
-# Per-query pipeline: 'multi_agent' (the booster harness, default on aegis_feat)
-# or 'graph' (the original LangGraph pipeline, kept for A/B comparison).
-orchestrator: multi_agent
+# Candidate pool: local (SLM only) | remote (LLM only) | ensemble (both, max accuracy)
+mode: ensemble
 
-# ============================================================================
-# Embedding Model Configuration (Query Planner Agent)
-# ============================================================================
-embedding:
-  model: BAAI/bge-m3  # Multilingual embedding model
-  device: cuda  # cuda or cpu
-  cache_dir: ~/.cache/huggingface  # HuggingFace cache directory
-  adapter_path: null  # Optional: Path to LoRA adapter for fine-tuning
-  batch_size: 32  # Batch size for embedding computation
-  max_length: 512  # Maximum sequence length
+models:
+  generator: cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct  # CSC candidate generator
+  merger: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct    # CSC merge-revision model
+  remote: gpt-4o               # remote ensemble arm (openai or anthropic model id)
+  remote_provider: openai
+  embedding: BAAI/bge-m3       # linked-retrieval embeddings
+  device: auto                 # local SLM device map
+  embedding_device: cuda
+  torch_dtype: float16
+  cache_dir: ~/.cache/huggingface
+  hf_token: ${HF_HUB_TOKEN}    # from .env
+  api_key: ${OPENAI_API_KEY}   # from .env
 
-# ============================================================================
-# Local SLM Configuration (FSLM)
-# ============================================================================
-slm:
-  model: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct #cycloneboy/SLM-SQL-1.5B  # Local SLM for SQL generation
-  device: auto  # auto/cuda/cpu (auto for automatic device mapping)
-  cache_dir: ~/.cache/huggingface  # HuggingFace cache directory
-  hf_token: ${HF_HUB_TOKEN}  # HuggingFace token from .env
-  adapter_path: null  # Optional: Path to LoRA adapter
-  max_tokens: 512
-  temperature: 0.0  # Greedy decoding (used by single-pass generate(); candidates use selection_temperature)
-  torch_dtype: float16  # float16/bfloat16/float32
-  trust_remote_code: true  # Trust remote code from HuggingFace
+retrieval:
+  schema_mode: auto            # full | linked | auto (full schema up to full_max_columns)
+  full_max_columns: 120        # BIRD dev DBs fit; big schemas fall back to linked
+  per_table_columns: 12        # linked mode: column cap per table (keys/value-hits always kept)
+  value_retrieval: true        # ground question literals to exact stored DB values
+  max_value_probes: 200
+  per_query_top_k: 40          # linked mode: columns per sub-query before fusion
+  max_sub_queries: 6
+  rerank: false                # linked mode: ColBERT re-rank
 
-  # --- Harness optimization knobs (all default-on, individually toggleable for ablations) ---
-  max_input_length: 8192        # Prompt token budget (raised from 2048 so the question is never truncated)
-  use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
-  full_schema: false            # Use top_k RAG retrieval (the stable baseline); true = inline the complete schema
-  full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
-  num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
-  selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
-  enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
-  enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
-  expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
-  retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
-  max_expanded_tables: 3        # Max FK-connected tables added to the anchors
+generation:
+  local_candidates: 16         # GRPO samples per query (64 = CSC-SQL paper-faithful)
+  remote_candidates: 4         # remote samples per strategy (0 disables the remote arm)
+  remote_strategies: [direct, query_plan]
+  temperature: 0.8             # CSC-SQL sampling temperature
+  max_tokens: 1024
 
-# ============================================================================
-# Remote LLM Configuration (FLLM)
-# ============================================================================
-llm:
-  provider: openai  # openai or anthropic
-  model: gpt-4o  # gpt-4o, gpt-4-turbo, claude-3-5-sonnet-20241022, etc.
-  api_key: ${OPENAI_API_KEY}  # Load from .env
-  temperature: 0.0
-  max_tokens: 512
-  timeout: 30  # Request timeout in seconds
-  max_retries: 3  # Maximum number of retries on failure
-  retry_delay: 1.0  # Initial delay between retries (exponential backoff)
+csc:
+  enabled: true                # merge-revision on the top-2 disagreeing vote groups
+  merge_candidates: 8          # merge model samples (CSC-SQL: 8)
 
-# ============================================================================
-# Privacy Configuration (DP Abstraction)
-# Hybrid mode (default). For the remote gpt-4o oracle run set epsilon=0 and
-# abstraction_enabled=false and reconstruction_enabled=false.
-# ============================================================================
-privacy:
-  epsilon: 1.0  # privacy budget (0 = disable abstraction)
-  abstraction_enabled: true  # Enable DP abstraction for remote queries
-  value_aware_abstraction: true  # Abstract only value-like tokens (proper nouns/literals), never schema words like 'name'/'price'
-  reconstruction_enabled: true  # Enable reconstruction (must match abstraction_enabled)
-  placeholder_vocab_size: 100  # Number of semantic placeholders in V_abs
+selection:
+  judge: auto                  # off | local | remote | auto (tie-breaks split votes)
+  max_judge_candidates: 4
+  timeout_seconds: 30          # per-candidate execution timeout during voting
 
-  sensitivity_policy:
-    pii: true  # Protect PII (names, emails, SSN, etc.)
-    proprietary: true  # Protect proprietary schema/data
-    regulated: true  # Protect regulated data (medical, financial)
+refine:
+  rounds: 1                    # bounded execution-feedback repair (0 disables)
 
-# ============================================================================
-# Cost Configuration
-# ============================================================================
-cost:
-  budget_per_query: 0.01  # USD budget per query
-  remote_token_cost: 0.000015  # Cost per token for remote LLM (GPT-4o pricing)
-  local_compute_cost: 0.0001  # Fixed cost per local SLM inference
-
-# ============================================================================
-# Router Configuration (Content-Independent Routing)
-# ============================================================================
-router:
-  threshold_complexity: 0.5  # Complexity threshold (0-1): >= threshold → REMOTE (lowered from 0.7 route ~98% to REMOTE)
-  force_local: false  # Force all queries to local FSLM (overrides threshold)
-  force_remote: false  # Force all queries to remote FLLM (overrides threshold)
-  features:
-    - query_token_count
-    - schema_element_count
-    - query_structural_complexity
-
-# ============================================================================
-# Query Ambiguity Resolution (Optional Enhancement - DISABLED BY DEFAULT)
-# ============================================================================
-ambiguity:
-  enabled: false  # Set to true to enable ambiguity detection and resolution
-  detector_type: "rules"  # "rules" (fast, local, zero-cost) or "llm" (higher accuracy)
-  resolution_mode: "auto"  # "auto" (use defaults) or "interactive" (ask user)
-  auto_resolve_temporal: true  # Automatically resolve temporal ambiguities
-  temporal_default_days: 30  # Default interpretation for "recent" queries
-  confidence_threshold: 0.6  # Minimum confidence (0-1) to flag ambiguity
-
-# ============================================================================
-# Verifier Configuration (Neuro-Symbolic Verification)
-# ============================================================================
 verifier:
-  grammar_check: true  # Enable grammar verification (sqlglot parser)
-  schema_check: true  # Enable schema verification
-  execution_check_slm: true  # Enable execution verification for SLM outputs
-  execution_check_llm: true  # Enable execution verification for LLM outputs
-  sample_size: 100  # Number of rows for execution verification
-  timeout_seconds: 30  # Execution timeout per query (raised 5->30 to stop clipping slow-but-correct SQL)
-  max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
-  repair_on_empty: true  # Treat an executed-but-empty result as a soft fail to trigger one value-aware repair
+  grammar_check: true
+  schema_check: true
+  execution_check_slm: true
+  execution_check_llm: true
+  sample_size: 100
+  timeout_seconds: 30
+  max_repair_attempts: 1
+  repair_on_empty: true
 
-# ============================================================================
-# Multi-Agent Booster Harness (orchestrator: multi_agent)
-# ============================================================================
-# A booster, not a bottleneck: diverse multi-strategy candidates + execution-guided
-# selection + a local-model judge + bounded execution-feedback refinement. Every
-# lever is a flag so the cost<->accuracy frontier can be A/B-tested.
-agents:
-  # Model-aware strategies: the local SLM is a specialist (direct self-consistency);
-  # the remote LLM is a general reasoner (add query-plan chain-of-thought).
-  local_strategies: [direct]                 # specialist SLM => direct self-consistency
-  remote_strategies: [direct, query_plan]    # general LLM => + CoT (add 'divide_and_conquer' for nested queries)
-  candidates_per_strategy: 2         # 1 greedy + (n-1) sampled, per strategy
-  generation_temperature: 0.7        # diversity for the sampled candidates
-  cot_max_tokens: 1024               # decode budget for CoT strategies (512 truncated reasoning+SQL)
-  refine_rounds: 1                   # bounded execution-feedback repair on the winner (0 disables)
-  judge_enabled: true                # tie-break split execution votes (CHASE-SQL selector)
-  judge_model: auto                  # local | remote | auto (remote only when abstraction is off)
-  max_judge_candidates: 4            # cap candidates shown to the judge
-  selection_timeout: 30              # per-candidate execution timeout (s) during select/refine
-
-# ============================================================================
-# Multi-Step Retrieval (RAG v2)
-# ============================================================================
-# Decompose -> per-sub-query hybrid search -> RRF fusion + table cards ->
-# value retrieval (ground literals in the DB) -> FK-aware adaptive budget ->
-# coverage-driven recursive round -> optional ColBERT re-rank.
-# Targets the measured failure modes: 7.5 tables retrieved for 1.76 needed on
-# simple queries (noise), 247/1534 wrong table sets (join mazes), literal errors.
-rag:
-  multi_step: true          # false = legacy single-shot top-k + FK closure (A/B control)
-  per_query_top_k: 40       # columns per sub-query before fusion
-  max_sub_queries: 6        # decomposition cap (bounds retrieval cost)
-  max_rounds: 2             # round 2 relaxes matching for uncovered entities
-  max_tables: 4             # evidence-table budget (FK bridges may exceed)
-  per_table_columns: 10     # per-table column budget (keys + value hits always kept)
-  value_retrieval: true     # locate question literals in the DB (exact stored forms)
-  max_value_probes: 200     # LIKE-probe budget per query
-  table_cards: true         # table-summary chunk evidence during fusion
-  rerank: true              # ColBERT re-rank of the final slice (same BGE-M3 model)
-
-# ============================================================================
-# Evaluation Configuration
-# ============================================================================
 evaluation:
-  bird_dev_path: ./data/bird_dev  # Path to BIRD-dev benchmark
-  output_dir: ./results  # Evaluation results directory
-  seed: 42  # Fixed seed for reproducibility
-  metrics:
-    - execution_accuracy  # EX metric
-    - ves  # Valid Efficiency Score
-    - privacy_loss  # ℒ_priv = ε × E[|prompt|] × Pr(r=remote)
-    - cost_per_query  # USD per query
-    - latency  # End-to-end latency
+  bird_dev_path: ./data/bird_dev
+  output_dir: ./results
+  seed: 42
+  metrics: [execution_accuracy, ves, cost_per_query, latency]
 
-# ============================================================================
-# Logging Configuration
-# ============================================================================
 logging:
-  level: INFO  # DEBUG, INFO, WARNING, ERROR
-  format: json  # json or text
+  level: INFO
+  format: json
   file: ./logs/aegis_sql.log
-  track_routing: true
-  track_privacy: true
-  track_verification: true
-  track_latency: true
-
-# ============================================================================
-# Configuration Presets (uncomment to use)
-# ============================================================================
-
-# --- LOCAL-ONLY MODE ---
-# Forces all queries to local FSLM (zero privacy leakage, no API costs)
-# router:
-#   force_local: true
-# OR set budget to 0:
-# cost:
-#   budget_per_query: 0.0
-
-# --- REMOTE-ONLY MODE ---
-# Forces all queries to remote FLLM (maximum accuracy, higher cost)
-# router:
-#   force_remote: true
-# OR set threshold to 0:
-# router:
-#   threshold_complexity: 0.0
-
-# --- NO ABSTRACTION MODE ---
-# Disables DP abstraction (WARNING: sensitive data sent to remote LLM!)
-# privacy:
-#   abstraction_enabled: false
-#   reconstruction_enabled: false
-# OR set epsilon to 0:
-# privacy:
-#   epsilon: 0.0
-
-# --- HYBRID MODE (DEFAULT) ---
-# Automatic routing based on complexity and cost
-# Abstraction enabled for remote queries
-# (Current configuration above)
-
-# ============================================================================
-# BOOSTER CLEAN-ABLATION MATRIX (measure harness+model vs model-alone)
-# The default hybrid run mixes the DP-abstraction penalty into 81% of queries, so
-# it is NOT a clean booster test. Run these four cells (same --num_queries 100
-# --seed 42 --stratify) and compare booster vs its single-shot control:
-#
-#  A. LOCAL booster   : orchestrator=multi_agent, router.force_local=true
-#  A'. LOCAL control  : orchestrator=graph,       router.force_local=true
-#  B. REMOTE booster  : orchestrator=multi_agent, router.force_remote=true,
-#                       privacy.epsilon=0, abstraction_enabled=false, reconstruction_enabled=false
-#  B'. REMOTE control : same as B but orchestrator=graph   (== the 47% gpt-4o baseline)
-#
-# Success = booster EX > control in each cell. Ablate agents.* to map cost<->accuracy.

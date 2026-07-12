@@ -23,7 +23,7 @@ from loguru import logger
 from tqdm import tqdm
 
 from config import AEGISConfig
-from workflow import build_aegis_graph
+from agents import MultiAgentOrchestrator
 from evaluation.bird_loader import load_bird_dev
 from aegis_types import RoutingDecision
 
@@ -101,7 +101,7 @@ def main():
         # Load configuration
         logger.info("\n[1/5] Loading configuration...")
         config = AEGISConfig.from_yaml(args.config)
-        logger.info(f"✓ Config loaded: {config.slm.model}")
+        logger.info(f"✓ Config loaded: mode={config.mode}, generator={config.models.generator}")
 
         # Save config snapshot
         config_snapshot = output_dir / "config_snapshot.yaml"
@@ -119,20 +119,10 @@ def main():
         )
         logger.info(f"✓ Loaded {len(queries)} queries")
 
-        # Build the per-query pipeline: the multi-agent booster or the original
-        # LangGraph. Both consume the same initial_state and return the same
-        # result-dict contract, so everything downstream is unchanged.
-        logger.info("\n[3/5] Building AEGIS-SQL workflow...")
-        use_agents = getattr(config, "orchestrator", "graph") == "multi_agent"
-        if use_agents:
-            from agents import MultiAgentOrchestrator
-            orchestrator = MultiAgentOrchestrator(config)
-            graph = None
-            logger.info("✓ Multi-agent booster orchestrator ready")
-        else:
-            orchestrator = None
-            graph = build_aegis_graph(config)
-            logger.info("✓ Workflow graph compiled")
+        # Build the per-query pipeline (AEGIS v1: single orchestrator).
+        logger.info("\n[3/5] Building AEGIS-SQL pipeline...")
+        orchestrator = MultiAgentOrchestrator(config)
+        logger.info(f"✓ Orchestrator ready (mode={config.mode})")
 
         # Warmup model cache (pre-load models and embeddings)
         logger.info("\n[4/5] Warming up model cache...")
@@ -191,14 +181,8 @@ def main():
                 aegis_query = loader.query_to_aegis_query(query_dict)
                 initial_state["query"] = aegis_query
 
-                # Run the active pipeline. For the graph, recursion_limit is a
-                # hard backstop: the repair loop is already bounded by
-                # verifier.max_repair_attempts, but this guarantees a pathological
-                # state raises instead of hanging the run (caught by the except).
-                if use_agents:
-                    result = orchestrator.run(initial_state)
-                else:
-                    result = graph.invoke(initial_state, config={"recursion_limit": 12})
+                # Run the pipeline (errors are caught below and recorded per query).
+                result = orchestrator.run(initial_state)
 
                 # Extract results
                 sql = result.get("sql")

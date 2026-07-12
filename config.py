@@ -231,108 +231,88 @@ class VerifierConfig(BaseModel):
     )
 
 
-class RagConfig(BaseModel):
-    """Multi-step retrieval (RAG v2) configuration.
+class ModelsConfig(BaseModel):
+    """All models used by the pipeline (accuracy-first: cost/privacy isolated).
 
-    The pipeline decomposes the question, retrieves per sub-query, fuses the
-    rankings (RRF), grounds literals against the database (value retrieval),
-    applies an FK-aware adaptive schema budget, and optionally re-ranks with
-    ColBERT. Every stage is a flag so the retrieval design is ablatable.
+    ``generator`` and ``merger`` are the CSC-SQL checkpoint pair: the GRPO model
+    generates candidates, the Merge model adjudicates the top-2 execution-vote
+    groups. They may be set to the SAME id (one model does both, off its trained
+    distribution for whichever role it was not tuned for — logged as a warning).
     """
 
-    multi_step: bool = Field(
-        default=True, description="Use the multi-step pipeline (False = legacy single-shot top-k)"
+    generator: str = Field(
+        default="cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct",
+        description="Local candidate-generation model (CSC GRPO checkpoint)",
     )
-    per_query_top_k: int = Field(
-        default=40, description="Columns retrieved per sub-query before fusion"
+    merger: str = Field(
+        default="cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct",
+        description="Local merge-revision model (CSC Merge checkpoint)",
     )
-    max_sub_queries: int = Field(
-        default=6, description="Cap on decomposed sub-queries (bounds retrieval cost)"
-    )
-    max_rounds: int = Field(
-        default=2, description="Retrieval rounds; round 2 relaxes matching for uncovered entities"
-    )
-    max_tables: int = Field(
-        default=4, description="Evidence-table budget (FK bridge tables may exceed it)"
-    )
-    per_table_columns: int = Field(
-        default=10, description="Column budget per kept table (keys + value hits always kept)"
-    )
-    value_retrieval: bool = Field(
-        default=True, description="Probe the DB to locate question literals in columns"
-    )
-    max_value_probes: int = Field(
-        default=200, description="LIKE-probe budget per query (cost bound)"
-    )
-    table_cards: bool = Field(
-        default=True, description="Use table-summary card evidence during fusion"
-    )
-    rerank: bool = Field(
-        default=True, description="ColBERT re-rank of the final slice (same BGE-M3 model)"
-    )
+    remote: str = Field(default="gpt-4o", description="Remote LLM for the ensemble")
+    remote_provider: str = Field(default="openai", description="openai or anthropic")
+    embedding: str = Field(default="BAAI/bge-m3", description="Embedding model (linked retrieval)")
+    device: str = Field(default="auto", description="Device map for local SLMs")
+    embedding_device: str = Field(default="cuda", description="Device for the embedding model")
+    torch_dtype: str = Field(default="float16", description="Local model dtype")
+    cache_dir: str = Field(default="~/.cache/huggingface", description="HF cache directory")
+    hf_token: str = Field(default="${HF_HUB_TOKEN}", description="HF token from .env")
+    api_key: str = Field(default="${OPENAI_API_KEY}", description="Remote API key from .env")
 
 
-class AgentsConfig(BaseModel):
-    """Multi-agent booster harness configuration.
+class RetrievalConfig(BaseModel):
+    """Schema stage. RECALL-FIRST: pruning that drops a needed table caps EX at 0.
 
-    Every lever is a flag so the cost<->accuracy frontier is directly A/B-able.
-    Defaults are the "moderate" booster: two complementary strategies, two
-    candidates each, execution-guided selection, and one execution-feedback
-    refine round.
+    ``schema_mode``: 'full' inlines the whole schema (the CSC-SQL 69.19% setting;
+    BIRD dev schemas are small), 'linked' runs the multi-step retriever, 'auto'
+    uses full up to ``full_max_columns`` total columns then falls back to linked.
+    Linked mode never drops tables — it only caps columns per table.
     """
 
-    # Strategies are model-aware: the local SLM is a SQL specialist (CscSQL/
-    # CSC-SQL) trained for direct generation, so it gets execution-guided
-    # self-consistency over `direct`; chain-of-thought tends to hurt it and adds
-    # latency. The remote LLM is a general reasoner, so it gets the CoT strategies.
-    local_strategies: List[str] = Field(
-        default=["direct"],
-        description="Strategies on the LOCAL SLM path (specialist => direct self-consistency)",
+    schema_mode: str = Field(default="auto", description="full | linked | auto")
+    full_max_columns: int = Field(default=120, description="'auto': full schema up to this many columns")
+    per_table_columns: int = Field(default=12, description="Linked mode: column cap per table (keys/value-hits always kept)")
+    value_retrieval: bool = Field(default=True, description="Locate question literals in the DB (exact stored forms)")
+    max_value_probes: int = Field(default=200, description="LIKE-probe budget per query")
+    per_query_top_k: int = Field(default=40, description="Linked mode: columns per sub-query before fusion")
+    max_sub_queries: int = Field(default=6, description="Linked mode: decomposition cap")
+    rerank: bool = Field(default=False, description="Linked mode: ColBERT re-rank of the final slice")
+
+
+class GenerationConfig(BaseModel):
+    """Candidate generation (the ensemble pool)."""
+
+    local_candidates: int = Field(
+        default=16, description="GRPO generator samples per query (64 = paper-faithful preset)"
+    )
+    remote_candidates: int = Field(
+        default=4, description="Remote LLM samples per strategy (0 disables the remote ensemble arm)"
     )
     remote_strategies: List[str] = Field(
-        default=["direct", "query_plan"],
-        description="Strategies on the REMOTE LLM path (general reasoner => add CoT). "
-        "Any of 'direct', 'query_plan', 'divide_and_conquer'",
+        default=["direct", "query_plan"], description="Remote reasoning strategies"
     )
-    candidates_per_strategy: int = Field(
-        default=2, description="Candidates sampled per strategy (1 greedy + rest sampled)"
-    )
-    generation_temperature: float = Field(
-        default=0.7, description="Sampling temperature for the non-greedy candidates"
-    )
-    refine_rounds: int = Field(
-        default=1, description="Bounded execution-feedback repair rounds on the winner (0 disables)"
-    )
-    judge_enabled: bool = Field(
-        default=True, description="Use a judge model to break split execution votes (CHASE-SQL selector)"
-    )
-    judge_model: str = Field(
-        default="auto",
-        description="Judge model: 'local' (trusted SLM, zero leakage), 'remote', or "
-        "'auto' (remote only when DP abstraction is disabled)",
-    )
-    max_judge_candidates: int = Field(
-        default=4, description="Cap on candidates shown to the selection judge"
-    )
-    cot_max_tokens: int = Field(
-        default=1024,
-        description="Decode budget for chain-of-thought strategies (reasoning + SQL; "
-        "the 512 default truncated CoT answers mid-fence)",
-    )
-    selection_timeout: int = Field(
-        default=30, description="Per-candidate execution timeout (seconds) during selection/refine"
-    )
+    temperature: float = Field(default=0.8, description="Sampling temperature (CSC-SQL setting)")
+    max_tokens: int = Field(default=1024, description="Decode budget (reasoning + SQL)")
 
-    @field_validator("local_strategies", "remote_strategies")
-    @classmethod
-    def validate_strategies(cls, v: List[str]) -> List[str]:
-        allowed = {"direct", "query_plan", "divide_and_conquer"}
-        bad = [s for s in v if s not in allowed]
-        if bad:
-            raise ValueError(f"Unknown strategies {bad}; allowed: {sorted(allowed)}")
-        if not v:
-            raise ValueError("At least one generation strategy is required")
-        return v
+
+class CscConfig(BaseModel):
+    """Corrective self-consistency (the merge-revision stage)."""
+
+    enabled: bool = Field(default=True, description="Run merge-revision on top-2 disagreeing vote groups")
+    merge_candidates: int = Field(default=8, description="Merge model samples (CSC-SQL: 8)")
+
+
+class SelectionConfig(BaseModel):
+    """Final selection when voting + merge leave a tie."""
+
+    judge: str = Field(default="auto", description="off | local | remote | auto (remote when available)")
+    max_judge_candidates: int = Field(default=4, description="Cap on candidates shown to the judge")
+    timeout_seconds: int = Field(default=30, description="Per-candidate execution timeout during voting")
+
+
+class RefineConfig(BaseModel):
+    """Bounded execution-feedback repair on the final answer (error/empty only)."""
+
+    rounds: int = Field(default=1, description="Max repair rounds (0 disables)")
 
 
 class EvaluationConfig(BaseModel):
@@ -345,52 +325,6 @@ class EvaluationConfig(BaseModel):
         default=["execution_accuracy", "ves", "privacy_loss", "cost_per_query", "latency"],
         description="Metrics to compute",
     )
-
-
-class AmbiguityConfig(BaseModel):
-    """Query ambiguity resolution configuration.
-
-    Detects and resolves ambiguous queries before SQL generation.
-
-    Attributes:
-        enabled: Enable ambiguity detection and resolution (default: False)
-        detector_type: Detection method - "rules" (fast, local) or "llm" (accurate)
-        resolution_mode: Resolution strategy - "auto" (use defaults) or "interactive" (ask user)
-        auto_resolve_temporal: Automatically resolve temporal ambiguities
-        temporal_default_days: Default days for "recent" queries (default: 30)
-        confidence_threshold: Minimum confidence to flag ambiguity (0-1)
-    """
-
-    enabled: bool = Field(default=False, description="Enable ambiguity detection (disabled by default)")
-    detector_type: str = Field(default="rules", description="Detection method: 'rules' or 'llm'")
-    resolution_mode: str = Field(default="auto", description="Resolution mode: 'auto' or 'interactive'")
-    auto_resolve_temporal: bool = Field(default=True, description="Auto-resolve temporal ambiguities")
-    temporal_default_days: int = Field(default=30, description="Default days for 'recent' queries")
-    confidence_threshold: float = Field(default=0.6, description="Min confidence to flag ambiguity (0-1)")
-
-    @field_validator("detector_type")
-    @classmethod
-    def validate_detector_type(cls, v: str) -> str:
-        """Validate detector type is valid."""
-        if v not in ["rules", "llm"]:
-            raise ValueError("detector_type must be 'rules' or 'llm'")
-        return v
-
-    @field_validator("resolution_mode")
-    @classmethod
-    def validate_resolution_mode(cls, v: str) -> str:
-        """Validate resolution mode is valid."""
-        if v not in ["auto", "interactive"]:
-            raise ValueError("resolution_mode must be 'auto' or 'interactive'")
-        return v
-
-    @field_validator("confidence_threshold")
-    @classmethod
-    def validate_confidence_threshold(cls, v: float) -> float:
-        """Validate confidence threshold is in valid range."""
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_threshold must be between 0.0 and 1.0")
-        return v
 
 
 class LoggingConfig(BaseModel):
@@ -429,22 +363,63 @@ class AEGISConfig(BaseSettings):
     """
 
     language: Language = Field(default=Language.ENGLISH, description="Query language")
-    orchestrator: str = Field(
-        default="graph",
-        description="Per-query pipeline: 'graph' (LangGraph) or 'multi_agent' (booster)",
+    mode: str = Field(
+        default="ensemble",
+        description="Candidate pool: 'local' (SLM only), 'remote' (LLM only), "
+        "'ensemble' (pool both — maximum accuracy)",
     )
-    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
-    slm: SLMConfig = Field(default_factory=SLMConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
-    privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
-    cost: CostConfig = Field(default_factory=CostConfig)
-    router: RouterConfig = Field(default_factory=RouterConfig)
-    ambiguity: AmbiguityConfig = Field(default_factory=AmbiguityConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    csc: CscConfig = Field(default_factory=CscConfig)
+    selection: SelectionConfig = Field(default_factory=SelectionConfig)
+    refine: RefineConfig = Field(default_factory=RefineConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
-    agents: AgentsConfig = Field(default_factory=AgentsConfig)
-    rag: RagConfig = Field(default_factory=RagConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("local", "remote", "ensemble"):
+            raise ValueError("mode must be 'local', 'remote', or 'ensemble'")
+        return v
+
+    # ----- builders: internal component configs from the v1 sections ---------
+    # Component classes (SLMConfig/LLMConfig/EmbeddingConfig) are retained as the
+    # constructor contracts of SLMGenerator/LLMFallback/SchemaRetriever; these
+    # helpers are the ONLY place the mapping lives.
+
+    def slm_config(self, model_id: str) -> SLMConfig:
+        """Internal SLMConfig for a local model (generator or merger)."""
+        return SLMConfig(
+            model=model_id,
+            device=self.models.device,
+            cache_dir=self.models.cache_dir,
+            hf_token=self.models.hf_token,
+            max_tokens=self.generation.max_tokens,
+            temperature=0.0,  # greedy default; sampling temp passed per call
+            torch_dtype=self.models.torch_dtype,
+            selection_temperature=self.generation.temperature,
+        )
+
+    def llm_config(self) -> LLMConfig:
+        """Internal LLMConfig for the remote ensemble arm."""
+        return LLMConfig(
+            provider=self.models.remote_provider,
+            model=self.models.remote,
+            api_key=self.models.api_key,
+            temperature=0.0,
+            max_tokens=self.generation.max_tokens,
+        )
+
+    def embedding_config(self) -> EmbeddingConfig:
+        """Internal EmbeddingConfig for the schema retriever."""
+        return EmbeddingConfig(
+            model=self.models.embedding,
+            device=self.models.embedding_device,
+            cache_dir=self.models.cache_dir,
+        )
 
     class Config:
         """Pydantic configuration."""

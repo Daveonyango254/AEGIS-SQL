@@ -327,7 +327,7 @@ def compute_three_axis_metrics(
                     original_tokens=[],  # Not stored in predictions
                     placeholder_map={},  # Not stored in predictions
                     num_substitutions=num_subs,
-                    epsilon=config.privacy.epsilon
+                    epsilon=0.0  # privacy isolated in AEGIS v1
                 )
             )
         else:
@@ -343,10 +343,12 @@ def compute_three_axis_metrics(
             )
 
     # Initialize metrics calculator
+    # Privacy is ISOLATED in AEGIS v1 (epsilon 0); cost constants mirror
+    # agents.orchestrator's reporting constants.
     calculator = MetricsCalculator(
-        epsilon=config.privacy.epsilon,
-        remote_token_cost=config.cost.remote_token_cost,
-        local_cost=config.cost.local_compute_cost
+        epsilon=0.0,
+        remote_token_cost=1.5e-05,
+        local_cost=1e-04,
     )
 
     # Compute privacy loss
