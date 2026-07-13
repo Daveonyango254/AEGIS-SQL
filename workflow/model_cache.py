@@ -268,6 +268,11 @@ class ModelCache:
         # when requested/installed, HF transformers otherwise. Same complete()
         # contract either way, so callers are backend-agnostic.
         backend = getattr(self._config.models, "backend", "auto") if self._config else "auto"
+        # Quantized loads go through HF/bitsandbytes — our vLLM path serves fp16
+        # engines only, so 'auto' + quantization must not silently pick vLLM and
+        # then OOM allocating two full-precision engines.
+        if getattr(slm_config, "quantization", "none") != "none" and backend == "auto":
+            backend = "hf"
         if backend in ("vllm", "auto"):
             from generator.vllm_backend import vllm_available
 
