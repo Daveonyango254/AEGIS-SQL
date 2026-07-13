@@ -39,7 +39,8 @@ def run_prediction_generation(
     stratify: bool,
     output_name: str,
     config_path: str,
-    bird_path: str
+    bird_path: str,
+    workers: int = 3,
 ) -> Path:
     """Run prediction generation step.
 
@@ -73,6 +74,8 @@ def run_prediction_generation(
 
     if stratify:
         cmd.append("--stratify")
+
+    cmd.extend(["--workers", str(workers)])
 
     logger.info(f"Running command: {' '.join(cmd)}")
     logger.info("\n" + "=" * 80)
@@ -521,6 +524,12 @@ def main():
         default=None,
         help="Use existing predictions file (skips step 1)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        help="Concurrent query workers for prediction generation (default: 3)",
+    )
 
     args = parser.parse_args()
 
@@ -562,7 +571,8 @@ def main():
                 stratify=args.stratify,
                 output_name=args.output_name,
                 config_path=args.config,
-                bird_path=args.bird_path
+                bird_path=args.bird_path,
+                workers=args.workers,
             )
 
         # Determine number of queries from predictions file

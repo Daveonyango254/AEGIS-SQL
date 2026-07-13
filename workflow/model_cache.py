@@ -258,40 +258,22 @@ class ModelCache:
             logger.debug(f"Cache HIT: SLM {model_id}")
             return self._slm_generators[model_id]
 
+        # Double-checked load lock: with a threaded evaluation harness, two
+        # workers hitting a cache miss at once must not both load a 15GB model.
+        with self._lock:
+            if model_id in self._slm_generators:
+                return self._slm_generators[model_id]
+            return self._load_slm(model_id)
+
+    def _load_slm(self, model_id: str) -> SLMGenerator:
         self._stats['slm_loads'] += 1
         logger.info(f"Cache MISS: loading SLM {model_id} ...")
         slm_config = (
             self._config.slm_config(model_id) if self._config else SLMConfig(model=model_id)
         )
 
-        # Backend selection: vLLM (continuous batching, 5-10x faster sampling)
-        # when requested/installed, HF transformers otherwise. Same complete()
-        # contract either way, so callers are backend-agnostic.
-        backend = getattr(self._config.models, "backend", "auto") if self._config else "auto"
-        # Quantized loads go through HF/bitsandbytes — our vLLM path serves fp16
-        # engines only, so 'auto' + quantization must not silently pick vLLM and
-        # then OOM allocating two full-precision engines.
-        if getattr(slm_config, "quantization", "none") != "none" and backend == "auto":
-            backend = "hf"
-        if backend in ("vllm", "auto"):
-            from generator.vllm_backend import vllm_available
-
-            if vllm_available():
-                from generator.vllm_backend import VllmGenerator
-
-                m = self._config.models if self._config else None
-                is_merger = m is not None and model_id == m.merger and m.merger != m.generator
-                fraction = (
-                    m.vllm_gpu_fraction_merger if is_merger else m.vllm_gpu_fraction_generator
-                ) if m else 0.55
-                self._slm_generators[model_id] = VllmGenerator(model_id, fraction, slm_config)
-                logger.info(f"✓ Cached SLM {model_id} (vLLM backend)")
-                return self._slm_generators[model_id]
-            if backend == "vllm":
-                raise RuntimeError("models.backend is 'vllm' but vllm is not installed")
-
         self._slm_generators[model_id] = SLMGenerator(slm_config)
-        logger.info(f"✓ Cached SLM {model_id} (HF backend)")
+        logger.info(f"✓ Cached SLM {model_id}")
         return self._slm_generators[model_id]
 
     def get_slm_generator(self, slm_config: Optional[SLMConfig] = None) -> SLMGenerator:

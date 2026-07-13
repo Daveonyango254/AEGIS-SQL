@@ -68,6 +68,14 @@ def main():
         default="data/bird",
         help="Path to BIRD data directory (default: data/bird)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        help="Concurrent query workers. GPU decode is serialized internally, so "
+        "workers overlap remote API calls + SQLite voting + verification with "
+        "GPU work (default: 3; 1 = serial)",
+    )
 
     args = parser.parse_args()
 
@@ -142,61 +150,39 @@ def main():
         cache.warmup(config, db_list)
         logger.info(f"✓ Cache warmed up with {len(db_list)} databases")
 
-        # Generate predictions
-        logger.info(f"\n[5/5] Generating SQL predictions for {len(queries)} queries...")
-        logger.info(f"Estimated time (with cache): ~{len(queries) * 2 / 60:.1f} minutes @ 2s/query")
+        # Generate predictions with a WORKER POOL. The GPU serializes on a lock
+        # inside the generator, so extra workers don't fight over VRAM — they
+        # overlap everything else (remote API calls, SQLite execution voting,
+        # verification, retrieval encoding) with the current query's GPU decode.
+        # Works identically on any GPU; workers=1 restores the serial loop.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        predictions = []
-        start_time = time.time()
+        from evaluation.bird_loader import BIRDLoader
 
-        # Create progress bar
-        pbar = tqdm(queries, desc="Generating SQL", unit="query", ncols=100)
+        loader = BIRDLoader(args.bird_path)
+        logger.info(
+            f"\n[5/5] Generating SQL predictions for {len(queries)} queries "
+            f"({args.workers} workers)..."
+        )
 
-        for i, query_dict in enumerate(pbar):
+        def process_one(query_dict: dict) -> dict:
+            """Run one query end-to-end and build its prediction record."""
             query_start = time.time()
-
-            # Update progress bar description
-            pbar.set_description(f"Query {i+1}/{len(queries)} (ID={query_dict['question_id']})")
-
-            logger.info(f"\n--- Query {i+1}/{len(queries)} (ID={query_dict['question_id']}) ---")
-            logger.info(f"Question: {query_dict['question'][:80]}...")
-            logger.info(f"Database: {query_dict['db_id']}")
-
             try:
-                # Prepare initial state
                 initial_state = {
-                    "query": query_dict['schema'].database_id,  # Will be converted
+                    "query": loader.query_to_aegis_query(query_dict),
                     "schema": query_dict['schema'],
                     "database_id": query_dict['db_id'],
                     "db_path": query_dict['db_path'],
-                    "cost_usd": 0.0,
-                    "latency_ms": 0.0,
-                    "privacy_loss": 0.0,
-                    "verification_attempts": 0,
                 }
-
-                # Convert to AEGIS Query object
-                from evaluation.bird_loader import BIRDLoader
-                loader = BIRDLoader(args.bird_path)
-                aegis_query = loader.query_to_aegis_query(query_dict)
-                initial_state["query"] = aegis_query
-
-                # Run the pipeline (errors are caught below and recorded per query).
                 result = orchestrator.run(initial_state)
 
-                # Extract results
                 sql = result.get("sql")
                 routing_decision = result.get("routing_decision")
-                abstracted_prompt = result.get("abstracted_prompt")
                 verification_result = result.get("verification_result")
-
-                query_latency = (time.time() - query_start) * 1000
-
-                # Clean SQL text (remove trailing newlines and extra spaces)
                 predicted_sql = sql.text.strip() if sql else ""
 
-                # Create prediction record
-                prediction = {
+                return {
                     "question_id": query_dict['question_id'],
                     "db_id": query_dict['db_id'],
                     "question": query_dict['question'],
@@ -205,9 +191,14 @@ def main():
                     "predicted_sql": predicted_sql,
                     "routing_decision": routing_decision.value if routing_decision else "unknown",
                     "generation_source": result.get("generation_source", "unknown"),
-                    "abstraction_applied": abstracted_prompt is not None,
-                    "num_substitutions": abstracted_prompt.num_substitutions if abstracted_prompt else 0,
-                    "latency_ms": query_latency,
+                    # Per-query arm report: which arm produced the FINAL answer
+                    # ("local"/"remote"/"merge"/"refine") + candidate pool sizes.
+                    "winner_arm": result.get("winner_arm", "unknown"),
+                    "candidates_local": result.get("candidates_local", 0),
+                    "candidates_remote": result.get("candidates_remote", 0),
+                    "abstraction_applied": False,  # privacy isolated in v1
+                    "num_substitutions": 0,
+                    "latency_ms": (time.time() - query_start) * 1000,
                     "cost_usd": result.get("cost_usd", 0.0),
                     "privacy_loss": result.get("privacy_loss", 0.0),
                     "verification_status": verification_result.status.value if verification_result else "unknown",
@@ -215,34 +206,13 @@ def main():
                     "schema_valid": verification_result.schema_valid if verification_result else None,
                     "execution_valid": verification_result.execution_valid if verification_result else None,
                     "difficulty": query_dict.get('difficulty', 'unknown'),
-                    # Retrieval diagnostics (table recall / noise analysis).
                     "retrieved_tables": result.get("retrieved_tables", []),
                     "num_retrieved_columns": result.get("num_retrieved_columns", 0),
                 }
-
-                predictions.append(prediction)
-
-                # Update progress bar with stats
-                elapsed = time.time() - start_time
-                avg_time = elapsed / (i + 1)
-                remaining_time = avg_time * (len(queries) - i - 1)
-                pbar.set_postfix({
-                    'avg': f'{avg_time:.1f}s',
-                    'eta': f'{remaining_time/60:.1f}min',
-                    'route': routing_decision.value if routing_decision else 'unknown'
-                })
-
-                logger.info(f"✓ Completed in {query_latency/1000:.1f}s")
-                logger.info(f"  Routing: {routing_decision}")
-                logger.info(f"  SQL: {predicted_sql[:80] if predicted_sql else 'None'}...")
-                logger.info(f"  Verified: {verification_result.status if verification_result else 'Unknown'}")
-
             except Exception as e:
                 logger.error(f"✗ Failed to process query {query_dict['question_id']}: {e}")
                 logger.exception("Full traceback:")
-
-                # Add failed prediction
-                predictions.append({
+                return {
                     "question_id": query_dict['question_id'],
                     "db_id": query_dict['db_id'],
                     "question": query_dict['question'],
@@ -251,12 +221,32 @@ def main():
                     "predicted_sql": "",
                     "routing_decision": "error",
                     "generation_source": "error",
+                    "winner_arm": "error",
                     "error": str(e),
                     "difficulty": query_dict.get('difficulty', 'unknown'),
-                })
+                }
 
-        # Close progress bar
+        start_time = time.time()
+        order = {q['question_id']: i for i, q in enumerate(queries)}
+        predictions = []
+        pbar = tqdm(total=len(queries), desc="Generating SQL", unit="query", ncols=100)
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+            futures = [pool.submit(process_one, q) for q in queries]
+            for future in as_completed(futures):
+                pred = future.result()
+                predictions.append(pred)
+                elapsed = time.time() - start_time
+                avg_time = elapsed / len(predictions)
+                pbar.set_postfix({
+                    'avg': f'{avg_time:.1f}s',
+                    'eta': f'{avg_time * (len(queries) - len(predictions)) / 60:.1f}min',
+                    'arm': pred.get('winner_arm', '?'),
+                })
+                pbar.update(1)
         pbar.close()
+
+        # Restore the sampled order (workers complete out of order).
+        predictions.sort(key=lambda p: order.get(p['question_id'], 0))
 
         total_time = time.time() - start_time
 

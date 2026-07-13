@@ -127,7 +127,8 @@ def _config(mode):
 
 
 CONTRACT_KEYS = ("sql", "routing_decision", "abstracted_prompt", "verification_result",
-                 "generation_source", "retrieved_tables", "num_retrieved_columns",
+                 "generation_source", "winner_arm", "candidates_local",
+                 "candidates_remote", "retrieved_tables", "num_retrieved_columns",
                  "cost_usd", "privacy_loss")
 
 
@@ -163,6 +164,10 @@ def test_merge_stage_adjudicates_disagreement():
     try:
         schema = _schema()
         cfg = _config("local")
+        # Distinct ids (the config DEFAULT is single-model) so the test can
+        # observe the merge model's calls separately from the generator's.
+        cfg.models.generator = "fake/generator"
+        cfg.models.merger = "fake/merger"
         # generator: 1-1 split between two results -> disagreement -> merge runs
         gen = _FakeSLM([["SELECT x FROM t WHERE x=1", "SELECT x FROM t WHERE x=2"]])
         merger = _FakeSLM([["SELECT x FROM t WHERE x=2"]])
@@ -232,6 +237,9 @@ def test_ensemble_pools_and_dedupes():
         assert result["routing_decision"] == RoutingDecision.REMOTE
         assert result["cost_usd"] > 0                     # local const + remote tokens
         assert result["sql"].text.startswith("SELECT x FROM t")
+        # arm accounting: pool sizes recorded, winner attributed to a real arm
+        assert result["candidates_local"] == 1 and result["candidates_remote"] == 2
+        assert result["winner_arm"] in ("local", "remote")
     finally:
         os.unlink(db)
 

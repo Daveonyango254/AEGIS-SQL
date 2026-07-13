@@ -21,6 +21,13 @@ from aegis_types import Query, SchemaElement, SQL
 from prompts.prompt_manager import get_prompt_manager
 from generator.sql_postprocess import finalize_sql
 
+# One GPU, many worker threads: all local decode calls serialize on this lock so
+# the evaluation harness can overlap CPU stages (execution voting, verification)
+# and remote API calls of other queries with the GPU work of the current one.
+import threading
+
+_GPU_LOCK = threading.Lock()
+
 # Default system prompt used when templates.yaml does not define one.
 _DEFAULT_SLM_SYSTEM_PROMPT = (
     "You are an expert text-to-SQL generator for the SQLite/BIRD benchmark. "
@@ -98,22 +105,6 @@ class SLMGenerator:
                 **{dtype_kwarg: dtype},
             )
 
-            # Optional bitsandbytes quantization — the 24GB-GPU escape hatch when
-            # two 7Bs don't fit fp16 (small accuracy risk; off by default).
-            quant = getattr(config, "quantization", "none")
-            if quant in ("8bit", "4bit"):
-                from transformers import BitsAndBytesConfig
-
-                load_kwargs["quantization_config"] = (
-                    BitsAndBytesConfig(load_in_8bit=True) if quant == "8bit"
-                    else BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_quant_type="nf4",
-                        bnb_4bit_compute_dtype=dtype,
-                    )
-                )
-                logger.info(f"Loading {config.model} quantized ({quant})")
-
             # Refuse silent CPU offload: device_map=auto spills layers to CPU RAM
             # when VRAM is short, which makes inference 10-100x slower and looks
             # like a hang. Capping max_memory to the GPU makes the shortfall fail
@@ -133,10 +124,10 @@ class SLMGenerator:
                     raise
                 raise RuntimeError(
                     f"{config.model} does not fit in the available GPU memory and CPU "
-                    "offload is disabled (it would be 10-100x slower). Remedies: use a "
-                    "48GB GPU (RunPod A40 is typically cheaper than 24GB PRO cards); OR "
-                    "set models.generator == models.merger so one model serves both "
-                    "roles; OR set models.quantization: 4bit; OR set "
+                    "offload is disabled (it would be 10-100x slower). Remedies: keep "
+                    "models.generator == models.merger (single 7B — the default); OR "
+                    "use a 48GB GPU (a RunPod A40 is typically cheaper than 24GB PRO "
+                    "cards) for the dual-checkpoint setup; OR set "
                     "models.allow_cpu_offload: true to accept the slowdown."
                 ) from e
 
@@ -451,7 +442,8 @@ class SLMGenerator:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.95
 
-        with torch.no_grad():
+        # Serialize GPU decode across worker threads (see _GPU_LOCK note above).
+        with _GPU_LOCK, torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
         input_length = inputs["input_ids"].shape[1]

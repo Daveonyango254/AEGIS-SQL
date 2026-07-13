@@ -40,7 +40,6 @@ class SLMConfig(BaseModel):
     torch_dtype: str = Field(default="float16", description="Torch dtype (float16/bfloat16/float32)")
     trust_remote_code: bool = Field(default=True, description="Trust remote code from HuggingFace")
     adapter_path: Optional[str] = Field(default=None, description="LoRA adapter path for fine-tuned SLM")
-    quantization: str = Field(default="none", description="none | 8bit | 4bit (bitsandbytes)")
     chunk_size: int = Field(default=4, description="Sequences per generate() call in complete()")
     allow_cpu_offload: bool = Field(default=False, description="Permit device_map CPU spill")
 
@@ -244,12 +243,14 @@ class ModelsConfig(BaseModel):
     """
 
     generator: str = Field(
-        default="cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct",
-        description="Local candidate-generation model (CSC GRPO checkpoint)",
+        default="cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct",
+        description="Local candidate-generation model. Default = the CSC Merge "
+        "checkpoint serving BOTH roles (one 7B fp16 fits any 20GB+ GPU). For the "
+        "dual-checkpoint setup on a 48GB GPU, set this to the GRPO checkpoint.",
     )
     merger: str = Field(
         default="cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct",
-        description="Local merge-revision model (CSC Merge checkpoint)",
+        description="Local merge-revision model (same id as generator = one instance)",
     )
     remote: str = Field(default="gpt-4o", description="Remote LLM for the ensemble")
     remote_provider: str = Field(default="openai", description="openai or anthropic")
@@ -260,27 +261,11 @@ class ModelsConfig(BaseModel):
     cache_dir: str = Field(default="~/.cache/huggingface", description="HF cache directory")
     hf_token: str = Field(default="${HF_HUB_TOKEN}", description="HF token from .env")
     api_key: str = Field(default="${OPENAI_API_KEY}", description="Remote API key from .env")
-    backend: str = Field(
-        default="auto",
-        description="Local inference backend: 'hf', 'vllm', or 'auto' (vllm when installed). "
-        "vLLM's continuous batching makes n-sample generation 5-10x faster.",
-    )
-    quantization: str = Field(
-        default="none",
-        description="Local model quantization: 'none', '8bit', or '4bit' (bitsandbytes NF4). "
-        "The 24GB-GPU escape hatch when two 7Bs don't fit fp16 — small accuracy risk.",
-    )
     allow_cpu_offload: bool = Field(
         default=False,
         description="Permit device_map=auto to spill layers to CPU RAM. CPU-offloaded "
         "inference is 10-100x slower — off by default so a model that doesn't fit "
         "fails LOUDLY with remedies instead of silently crawling.",
-    )
-    vllm_gpu_fraction_generator: float = Field(
-        default=0.55, description="vLLM gpu_memory_utilization for the generator engine"
-    )
-    vllm_gpu_fraction_merger: float = Field(
-        default=0.35, description="vLLM gpu_memory_utilization for the merger engine"
     )
 
 
@@ -432,7 +417,6 @@ class AEGISConfig(BaseSettings):
             temperature=0.0,  # greedy default; sampling temp passed per call
             torch_dtype=self.models.torch_dtype,
             selection_temperature=self.generation.temperature,
-            quantization=self.models.quantization,
             chunk_size=self.generation.local_chunk_size,
             allow_cpu_offload=self.models.allow_cpu_offload,
         )

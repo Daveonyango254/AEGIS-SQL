@@ -46,9 +46,9 @@ class MultiAgentOrchestrator:
         self.linker = SchemaLinkerAgent(config)
         self.reviewer = ReviewerAgent(config)
         if config.models.generator == config.models.merger:
-            logger.warning(
-                "models.generator == models.merger: one checkpoint will serve both "
-                "roles (off its trained distribution for one of them)"
+            logger.info(
+                "Single-model mode: one checkpoint serves generation and merge "
+                "(the default; fits any 20GB+ GPU in fp16)"
             )
 
     # ------------------------------------------------------------------ main --
@@ -68,8 +68,11 @@ class MultiAgentOrchestrator:
         # --- Candidate pool ----------------------------------------------------
         # The remote arm is pure I/O, so in ensemble mode it runs CONCURRENTLY
         # with local GPU generation — per-query wall time is max(local, remote)
-        # instead of their sum.
+        # instead of their sum. Every candidate is tagged with the arm that
+        # produced it so the prediction record can report which arm WON.
         pool: List[str] = []
+        origin: dict = {}  # normalized sql -> "local" | "remote" | "merge" | "refine"
+        n_local = n_remote = 0
         llm = None
         remote_future = None
         use_remote = (
@@ -86,10 +89,18 @@ class MultiAgentOrchestrator:
             )
             executor.shutdown(wait=False)
         if self.mode in ("local", "ensemble"):
-            pool += self._local_candidates(cache, query, db_details)
+            local = self._local_candidates(cache, query, db_details)
+            n_local = len(local)
+            for sql in local:
+                origin.setdefault(sql.strip().lower(), "local")
+            pool += local
         if remote_future is not None:
             try:
-                pool += remote_future.result()
+                remote = remote_future.result()
+                n_remote = len(remote)
+                for sql in remote:
+                    origin.setdefault(sql.strip().lower(), "remote")
+                pool += remote
             except Exception as e:
                 logger.warning(f"Orchestrator: remote arm failed ({e})")
 
@@ -100,14 +111,26 @@ class MultiAgentOrchestrator:
 
         # --- CSC selection: vote -> merge-revise -> re-vote ---------------------
         timeout = self.config.selection.timeout_seconds
-        merge_fn = self._merge_fn(cache, query, schema) if self.config.csc.enabled else None
+        merge_fn = None
+        if self.config.csc.enabled:
+            inner_merge = self._merge_fn(cache, query, schema)
+
+            def merge_fn(groups):
+                out = inner_merge(groups)
+                for sql in out:  # merge outputs are their own arm in the report
+                    origin.setdefault(sql.strip().lower(), "merge")
+                return out
+
         best = csc_select(pool, db_path, merge_fn=merge_fn, timeout=timeout)
 
         # --- Judge tie-break (equal top votes and CSC didn't adjudicate) --------
         best = self._judge_tiebreak(cache, llm, query, elements, schema, pool, best, db_path)
 
         # --- Bounded refine (revision prompt on error/empty results) ------------
-        best = self._refine(cache, query, schema, best, db_path)
+        refined = self._refine(cache, query, schema, best, db_path)
+        if refined.strip().lower() != best.strip().lower():
+            origin.setdefault(refined.strip().lower(), "refine")
+        best = refined
 
         sql = SQL(text=best, dialect="sqlite", source=self._source(), verified=False)
         verification_result = self.reviewer.review(sql, schema, db_path)
@@ -122,6 +145,12 @@ class MultiAgentOrchestrator:
             "abstracted_prompt": None,   # privacy isolated in v1
             "verification_result": verification_result,
             "generation_source": self._source(),
+            # Which arm produced the FINAL answer ("local"/"remote"/"merge"/
+            # "refine") + pool sizes — the per-query routing record for
+            # analyzing local-vs-remote wins in ensemble mode.
+            "winner_arm": origin.get(best.strip().lower(), self._source()),
+            "candidates_local": n_local,
+            "candidates_remote": n_remote,
             "retrieved_tables": tables,
             "num_retrieved_columns": num_columns,
             "cost_usd": cost,

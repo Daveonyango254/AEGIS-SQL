@@ -13,25 +13,20 @@ language: english
 # Candidate pool: local (SLM only) | remote (LLM only) | ensemble (both, max accuracy)
 mode: ensemble
 
-# HARDWARE NOTE: generator + merger are two 7B models — ~30GB VRAM at fp16.
-# On RunPod an A40 48GB (~$0.39/hr) fits both and is CHEAPER than 24GB PRO cards.
-# On a 24GB GPU choose ONE of: (a) set merger == generator (single model, both
-# roles), (b) quantization: 4bit, (c) allow_cpu_offload: true (10-100x slower —
-# not recommended). By default a model that doesn't fit fails loudly at load.
+# Default: ONE 7B fp16 model serves generation AND merge-revision — fits any
+# 20GB+ GPU, no GPU-specific setup. Dual-checkpoint upgrade (48GB GPUs): set
+# generator: cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct and keep merger.
+# A model that doesn't fit fails LOUDLY at load (no silent CPU offload).
 models:
-  generator: cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct  # CSC candidate generator
-  merger: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct    # CSC merge-revision model
+  generator: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct  # candidate generation
+  merger: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct     # merge-revision (same id = one instance)
   remote: gpt-4o               # remote ensemble arm (openai or anthropic model id)
   remote_provider: openai
   embedding: BAAI/bge-m3       # linked-retrieval embeddings
   device: auto                 # local SLM device map
   embedding_device: cuda
   torch_dtype: float16
-  backend: auto                # hf | vllm | auto (vLLM when installed: 5-10x faster sampling)
-  quantization: none           # none | 8bit | 4bit (bitsandbytes; 24GB escape hatch)
   allow_cpu_offload: false     # keep false: CPU-offloaded inference looks like a hang
-  vllm_gpu_fraction_generator: 0.55  # per-engine GPU share when backend=vllm
-  vllm_gpu_fraction_merger: 0.35
   cache_dir: ~/.cache/huggingface
   hf_token: ${HF_HUB_TOKEN}    # from .env
   api_key: ${OPENAI_API_KEY}   # from .env
