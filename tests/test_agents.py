@@ -181,6 +181,35 @@ def test_merge_stage_adjudicates_disagreement():
         os.unlink(db)
 
 
+def test_chunked_sampling_oom_backoff():
+    """_sample_chunked halves the chunk on CUDA OOM and still delivers n samples."""
+    import types as _types
+
+    # torch stub with a cuda namespace the backoff path touches.
+    torch_stub = sys.modules["torch"]
+    class _OOM(Exception):
+        pass
+    torch_stub.cuda = _types.SimpleNamespace(
+        OutOfMemoryError=_OOM, empty_cache=lambda: None)
+
+    from generator.slm_generator import SLMGenerator
+
+    gen = SLMGenerator.__new__(SLMGenerator)          # no model load
+    gen.config = _types.SimpleNamespace(chunk_size=4)
+    calls = []
+
+    def fake_run(inputs, max_tokens, do_sample, temperature, num_return_sequences=1):
+        calls.append(num_return_sequences)
+        if num_return_sequences > 2:                  # batches >2 "don't fit"
+            raise _OOM()
+        return [f"SELECT {len(calls)}"] * num_return_sequences
+
+    gen._run_generation = fake_run
+    out = SLMGenerator._sample_chunked(gen, None, n=6, max_tokens=64, temperature=0.8)
+    assert len(out) == 6                              # all samples delivered
+    assert calls[0] == 4 and max(calls[1:]) <= 2      # halved after the OOM
+
+
 def test_ensemble_pools_and_dedupes():
     db = _make_db()
     try:

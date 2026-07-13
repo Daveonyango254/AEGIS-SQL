@@ -90,15 +90,55 @@ class SLMGenerator:
             _tf_ver = tuple(int(p) for p in transformers.__version__.split(".")[:2])
             dtype_kwarg = "dtype" if _tf_ver >= (4, 56) else "torch_dtype"
 
-            # Load model
-            self.model = AutoModelForCausalLM.from_pretrained(
-                config.model,
+            load_kwargs = dict(
                 device_map=config.device,
                 token=hf_token,
                 cache_dir=str(cache_dir),
                 trust_remote_code=config.trust_remote_code,
                 **{dtype_kwarg: dtype},
             )
+
+            # Optional bitsandbytes quantization — the 24GB-GPU escape hatch when
+            # two 7Bs don't fit fp16 (small accuracy risk; off by default).
+            quant = getattr(config, "quantization", "none")
+            if quant in ("8bit", "4bit"):
+                from transformers import BitsAndBytesConfig
+
+                load_kwargs["quantization_config"] = (
+                    BitsAndBytesConfig(load_in_8bit=True) if quant == "8bit"
+                    else BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=dtype,
+                    )
+                )
+                logger.info(f"Loading {config.model} quantized ({quant})")
+
+            # Refuse silent CPU offload: device_map=auto spills layers to CPU RAM
+            # when VRAM is short, which makes inference 10-100x slower and looks
+            # like a hang. Capping max_memory to the GPU makes the shortfall fail
+            # LOUDLY at load time instead.
+            if (
+                not getattr(config, "allow_cpu_offload", False)
+                and config.device in ("auto", "cuda")
+                and torch.cuda.is_available()
+            ):
+                free_bytes, _total = torch.cuda.mem_get_info(0)
+                load_kwargs["max_memory"] = {0: int(free_bytes * 0.95), "cpu": 0}
+
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(config.model, **load_kwargs)
+            except ValueError as e:
+                if "max_memory" not in load_kwargs:
+                    raise
+                raise RuntimeError(
+                    f"{config.model} does not fit in the available GPU memory and CPU "
+                    "offload is disabled (it would be 10-100x slower). Remedies: use a "
+                    "48GB GPU (RunPod A40 is typically cheaper than 24GB PRO cards); OR "
+                    "set models.generator == models.merger so one model serves both "
+                    "roles; OR set models.quantization: 4bit; OR set "
+                    "models.allow_cpu_offload: true to accept the slowdown."
+                ) from e
 
             # Load LoRA adapter if specified
             if config.adapter_path:
@@ -282,9 +322,8 @@ class SLMGenerator:
                 temperature=0.0, num_return_sequences=1,
             )
             if n > 1 and temperature > 0:
-                texts.extend(self._run_generation(
-                    inputs, max_tokens=max_tokens, do_sample=True,
-                    temperature=temperature, num_return_sequences=n - 1,
+                texts.extend(self._sample_chunked(
+                    inputs, n - 1, max_tokens=max_tokens, temperature=temperature
                 ))
             if raw:
                 return [t.strip() for t in texts if t and t.strip()]
@@ -292,6 +331,43 @@ class SLMGenerator:
         except Exception as e:
             logger.error(f"SLM complete() failed: {e}")
             return []
+
+    def _sample_chunked(
+        self, inputs, n: int, max_tokens: int, temperature: float
+    ) -> List[str]:
+        """Draw ``n`` temperature samples in memory-bounded chunks.
+
+        A single generate() with num_return_sequences=n allocates n KV caches at
+        once — the exact OOM that silently killed the local arm on 24GB GPUs.
+        Independent samples are statistically identical whether drawn in one
+        batch or several, so chunking changes memory use, not the distribution.
+        On CUDA OOM the chunk size halves (floor 1) and the draw is retried.
+        """
+        chunk = max(1, getattr(self.config, "chunk_size", 4))
+        texts: List[str] = []
+        remaining = n
+        while remaining > 0:
+            batch = min(chunk, remaining)
+            try:
+                texts.extend(self._run_generation(
+                    inputs, max_tokens=max_tokens, do_sample=True,
+                    temperature=temperature, num_return_sequences=batch,
+                ))
+                remaining -= batch
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if chunk == 1:
+                    logger.error(
+                        f"CUDA OOM even at chunk size 1 — returning {len(texts)}/{n} "
+                        "samples. The model barely fits; use a larger GPU or "
+                        "models.quantization: 4bit."
+                    )
+                    break
+                chunk = max(1, chunk // 2)
+                logger.warning(
+                    f"CUDA OOM while sampling; halving chunk size to {chunk} and retrying"
+                )
+        return texts
 
     def _build_inputs(
         self,

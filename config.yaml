@@ -13,6 +13,11 @@ language: english
 # Candidate pool: local (SLM only) | remote (LLM only) | ensemble (both, max accuracy)
 mode: ensemble
 
+# HARDWARE NOTE: generator + merger are two 7B models — ~30GB VRAM at fp16.
+# On RunPod an A40 48GB (~$0.39/hr) fits both and is CHEAPER than 24GB PRO cards.
+# On a 24GB GPU choose ONE of: (a) set merger == generator (single model, both
+# roles), (b) quantization: 4bit, (c) allow_cpu_offload: true (10-100x slower —
+# not recommended). By default a model that doesn't fit fails loudly at load.
 models:
   generator: cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct  # CSC candidate generator
   merger: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct    # CSC merge-revision model
@@ -22,6 +27,11 @@ models:
   device: auto                 # local SLM device map
   embedding_device: cuda
   torch_dtype: float16
+  backend: auto                # hf | vllm | auto (vLLM when installed: 5-10x faster sampling)
+  quantization: none           # none | 8bit | 4bit (bitsandbytes; 24GB escape hatch)
+  allow_cpu_offload: false     # keep false: CPU-offloaded inference looks like a hang
+  vllm_gpu_fraction_generator: 0.55  # per-engine GPU share when backend=vllm
+  vllm_gpu_fraction_merger: 0.35
   cache_dir: ~/.cache/huggingface
   hf_token: ${HF_HUB_TOKEN}    # from .env
   api_key: ${OPENAI_API_KEY}   # from .env
@@ -42,6 +52,7 @@ generation:
   remote_strategies: [direct, query_plan]
   temperature: 0.8             # CSC-SQL sampling temperature
   max_tokens: 1024
+  local_chunk_size: 4          # HF backend: samples per generate() call (halves on OOM)
 
 csc:
   enabled: true                # merge-revision on the top-2 disagreeing vote groups

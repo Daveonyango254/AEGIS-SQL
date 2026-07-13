@@ -66,13 +66,32 @@ class MultiAgentOrchestrator:
         db_details = omnisql.build_db_details(schema, elements)
 
         # --- Candidate pool ----------------------------------------------------
+        # The remote arm is pure I/O, so in ensemble mode it runs CONCURRENTLY
+        # with local GPU generation — per-query wall time is max(local, remote)
+        # instead of their sum.
         pool: List[str] = []
         llm = None
+        remote_future = None
+        use_remote = (
+            self.mode in ("remote", "ensemble")
+            and self.config.generation.remote_candidates > 0
+        )
+        if use_remote:
+            from concurrent.futures import ThreadPoolExecutor
+
+            llm = cache.get_llm_generator()
+            executor = ThreadPoolExecutor(max_workers=1)
+            remote_future = executor.submit(
+                self._remote_candidates, llm, query, elements, schema
+            )
+            executor.shutdown(wait=False)
         if self.mode in ("local", "ensemble"):
             pool += self._local_candidates(cache, query, db_details)
-        if self.mode in ("remote", "ensemble") and self.config.generation.remote_candidates > 0:
-            llm = cache.get_llm_generator()
-            pool += self._remote_candidates(llm, query, elements, schema)
+        if remote_future is not None:
+            try:
+                pool += remote_future.result()
+            except Exception as e:
+                logger.warning(f"Orchestrator: remote arm failed ({e})")
 
         pool = self._dedupe(pool)
         if not pool:

@@ -263,8 +263,30 @@ class ModelCache:
         slm_config = (
             self._config.slm_config(model_id) if self._config else SLMConfig(model=model_id)
         )
+
+        # Backend selection: vLLM (continuous batching, 5-10x faster sampling)
+        # when requested/installed, HF transformers otherwise. Same complete()
+        # contract either way, so callers are backend-agnostic.
+        backend = getattr(self._config.models, "backend", "auto") if self._config else "auto"
+        if backend in ("vllm", "auto"):
+            from generator.vllm_backend import vllm_available
+
+            if vllm_available():
+                from generator.vllm_backend import VllmGenerator
+
+                m = self._config.models if self._config else None
+                is_merger = m is not None and model_id == m.merger and m.merger != m.generator
+                fraction = (
+                    m.vllm_gpu_fraction_merger if is_merger else m.vllm_gpu_fraction_generator
+                ) if m else 0.55
+                self._slm_generators[model_id] = VllmGenerator(model_id, fraction, slm_config)
+                logger.info(f"✓ Cached SLM {model_id} (vLLM backend)")
+                return self._slm_generators[model_id]
+            if backend == "vllm":
+                raise RuntimeError("models.backend is 'vllm' but vllm is not installed")
+
         self._slm_generators[model_id] = SLMGenerator(slm_config)
-        logger.info(f"✓ Cached SLM {model_id}")
+        logger.info(f"✓ Cached SLM {model_id} (HF backend)")
         return self._slm_generators[model_id]
 
     def get_slm_generator(self, slm_config: Optional[SLMConfig] = None) -> SLMGenerator:
