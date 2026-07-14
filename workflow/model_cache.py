@@ -20,11 +20,10 @@ from pathlib import Path
 
 from loguru import logger
 
-from config import AEGISConfig, EmbeddingConfig, SLMConfig, LLMConfig, RouterConfig, CostConfig
+from config import AEGISConfig, EmbeddingConfig, SLMConfig, LLMConfig
 from aegis_types import Schema
 from retriever.schema_retriever import SchemaRetriever
 from generator.slm_generator import SLMGenerator
-from router.content_independent_router import ContentIndependentRouter
 
 
 class ModelCache:
@@ -33,15 +32,13 @@ class ModelCache:
     Usage:
         >>> cache = ModelCache.get_instance()
         >>> retriever = cache.get_schema_retriever(db_id, schema)
-        >>> generator = cache.get_slm_generator()
-        >>> router = cache.get_router()
+        >>> generator = cache.get_slm(model_id)
 
     Attributes:
         _instance: Singleton instance
         _lock: Thread lock for thread-safe singleton
         _embedding_model: Cached BGE-M3 model
-        _slm_generator: Cached SLM generator
-        _router: Cached router
+        _slm_generators: Cached SLM generators keyed by model id
         _schema_retrievers: Dict of cached schema retrievers per database
         _config: Global AEGIS configuration
         _max_cached_retrievers: Max number of retrievers to cache (memory limit)
@@ -57,10 +54,10 @@ class ModelCache:
 
         # Cached models
         self._bgem3_model = None  # BGE-M3 model (shared across all retrievers)
-        self._slm_generator: Optional[SLMGenerator] = None
-        self._router: Optional[ContentIndependentRouter] = None
+        # Local SLMs keyed by model id — the CSC pipeline runs TWO checkpoints
+        # (generator + merger); identical ids share one instance.
+        self._slm_generators: Dict[str, SLMGenerator] = {}
         self._schema_retrievers: Dict[str, SchemaRetriever] = {}
-        self._ambiguity_resolver = None  # AmbiguityResolver (lazy-loaded if enabled)
 
         # Config
         self._config: Optional[AEGISConfig] = None
@@ -130,7 +127,7 @@ class ModelCache:
         # Get config
         if embedding_config is None:
             if self._config:
-                embedding_config = self._config.embedding
+                embedding_config = self._config.embedding_config()
             else:
                 embedding_config = EmbeddingConfig()
 
@@ -204,7 +201,7 @@ class ModelCache:
         # Get config
         if embedding_config is None:
             if self._config:
-                embedding_config = self._config.embedding
+                embedding_config = self._config.embedding_config()
             else:
                 embedding_config = EmbeddingConfig()
 
@@ -248,76 +245,40 @@ class ModelCache:
 
         return retriever
 
-    def get_slm_generator(self, slm_config: Optional[SLMConfig] = None) -> SLMGenerator:
-        """Get or create SLM generator.
+    def get_slm(self, model_id: Optional[str] = None) -> SLMGenerator:
+        """Get or load a local SLM by model id (cached; same id shares one instance).
 
-        Args:
-            slm_config: Optional SLM config (uses default if None)
-
-        Returns:
-            Cached or newly created SLMGenerator
+        ``None`` resolves to the configured candidate GENERATOR. The CSC merge
+        model is fetched with ``get_slm(config.models.merger)`` — lazily, so a
+        run that never reaches the merge stage never loads it.
         """
-        if self._slm_generator is not None:
-            logger.debug("Cache HIT: SLMGenerator")
-            return self._slm_generator
+        if model_id is None:
+            model_id = self._config.models.generator if self._config else SLMConfig().model
+        if model_id in self._slm_generators:
+            logger.debug(f"Cache HIT: SLM {model_id}")
+            return self._slm_generators[model_id]
 
-        # Cache miss - create new generator
+        # Double-checked load lock: with a threaded evaluation harness, two
+        # workers hitting a cache miss at once must not both load a 15GB model.
+        with self._lock:
+            if model_id in self._slm_generators:
+                return self._slm_generators[model_id]
+            return self._load_slm(model_id)
+
+    def _load_slm(self, model_id: str) -> SLMGenerator:
         self._stats['slm_loads'] += 1
-        logger.info("Cache MISS: Loading SLMGenerator...")
+        logger.info(f"Cache MISS: loading SLM {model_id} ...")
+        slm_config = (
+            self._config.slm_config(model_id) if self._config else SLMConfig(model=model_id)
+        )
 
-        # Get config
-        if slm_config is None:
-            if self._config:
-                slm_config = self._config.slm
-            else:
-                slm_config = SLMConfig()
+        self._slm_generators[model_id] = SLMGenerator(slm_config)
+        logger.info(f"✓ Cached SLM {model_id}")
+        return self._slm_generators[model_id]
 
-        # Create and cache
-        self._slm_generator = SLMGenerator(slm_config)
-        logger.info("✓ Cached SLMGenerator")
-
-        return self._slm_generator
-
-    def get_router(
-        self,
-        router_config: Optional[RouterConfig] = None,
-        cost_config: Optional[CostConfig] = None
-    ) -> ContentIndependentRouter:
-        """Get or create router.
-
-        Args:
-            router_config: Optional router config
-            cost_config: Optional cost config
-
-        Returns:
-            Cached or newly created Router
-        """
-        if self._router is not None:
-            logger.debug("Cache HIT: Router")
-            return self._router
-
-        # Cache miss - create new router
-        self._stats['router_loads'] += 1
-        logger.debug("Cache MISS: Creating Router...")
-
-        # Get configs
-        if router_config is None:
-            if self._config:
-                router_config = self._config.router
-            else:
-                router_config = RouterConfig()
-
-        if cost_config is None:
-            if self._config:
-                cost_config = self._config.cost
-            else:
-                cost_config = CostConfig()
-
-        # Create and cache
-        self._router = ContentIndependentRouter(router_config, cost_config)
-        logger.debug("✓ Cached Router")
-
-        return self._router
+    def get_slm_generator(self, slm_config: Optional[SLMConfig] = None) -> SLMGenerator:
+        """Back-compat shim: the configured candidate generator."""
+        return self.get_slm(slm_config.model if slm_config else None)
 
     def get_llm_generator(self, llm_config: Optional[LLMConfig] = None):
         """Get LLM fallback generator with proper config.
@@ -334,7 +295,7 @@ class ModelCache:
         # Get config from cache
         if llm_config is None:
             if self._config:
-                llm_config = self._config.llm
+                llm_config = self._config.llm_config()
             else:
                 llm_config = LLMConfig()
 
@@ -380,19 +341,16 @@ class ModelCache:
 
         self.set_config(config)
 
-        # Pre-load SLM (heaviest, ~30-40s)
-        logger.info("\n[1/3] Pre-loading SLM Generator...")
-        self.get_slm_generator(config.slm)
-
-        # Pre-load Router
-        logger.info("\n[2/3] Pre-loading Router...")
-        self.get_router(config.router, config.cost)
+        # Pre-load the candidate generator (heaviest; the merge model loads
+        # lazily on the first query that actually reaches the merge stage).
+        logger.info("\n[1/2] Pre-loading candidate generator...")
+        self.get_slm(config.models.generator)
 
         # Pre-load schema retrievers (with BGE-M3 embedding)
-        logger.info(f"\n[3/3] Pre-loading {len(db_ids_and_schemas)} Schema Retrievers...")
+        logger.info(f"\n[2/2] Pre-loading {len(db_ids_and_schemas)} Schema Retrievers...")
         for i, (db_id, schema) in enumerate(db_ids_and_schemas, 1):
             logger.info(f"  [{i}/{len(db_ids_and_schemas)}] {db_id}...")
-            self.get_schema_retriever(db_id, schema, config.embedding)
+            self.get_schema_retriever(db_id, schema, config.embedding_config())
 
         logger.info("\n" + "=" * 80)
         logger.info("✓ CACHE WARMUP COMPLETE")
@@ -428,8 +386,7 @@ class ModelCache:
     def _clear_all(self) -> None:
         """Clear all cached models (internal use only)."""
         self._bgem3_model = None
-        self._slm_generator = None
-        self._router = None
+        self._slm_generators = {}
         self._ambiguity_resolver = None
         self._schema_retrievers.clear()
         self._retriever_access_order.clear()

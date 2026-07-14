@@ -49,11 +49,13 @@ class MultiStepRetriever:
         Args:
             retriever: a ready ``SchemaRetriever`` (cached embeddings) for this DB.
             schema: the populated ``Schema`` (FKs / PKs for bridging and budget).
-            config: the loaded AEGIS config (``config.rag`` holds the knobs).
+            config: the loaded AEGIS config (``config.retrieval`` holds the knobs).
         """
         self.retriever = retriever
         self.schema = schema
-        self.rag = config.rag
+        # v1: knobs live in config.retrieval; table cards and the relaxed
+        # second round are always on, and tables are NEVER dropped (recall-first).
+        self.rag = config.retrieval
         self.by_name = {c.name: c for c in schema.columns if "." in c.name}
 
     def retrieve(self, query, db_path: str) -> List:
@@ -70,7 +72,7 @@ class MultiStepRetriever:
 
         value_hits: Dict[str, List[Tuple[str, str]]] = {}
         chosen: List[str] = []
-        for round_idx in range(max(1, self.rag.max_rounds)):
+        for round_idx in range(2):  # round 2 = relaxed matching for uncovered entities
             relaxed = round_idx > 0
 
             # --- Step 1: per-sub-query hybrid search (dense+sparse, scored) ----
@@ -85,7 +87,7 @@ class MultiStepRetriever:
             scores = rrf_fuse(rankings)
 
             # Table-card evidence lifts every column of a matched table.
-            if self.rag.table_cards:
+            if True:  # table-card evidence (always on)
                 card_scores = self.retriever.score_table_cards(dq.sub_queries[0])
                 for name in scores:
                     t = name.split(".", 1)[0]
@@ -118,7 +120,7 @@ class MultiStepRetriever:
             )
             chosen = adaptive_budget(
                 boosted, hit_columns, self.schema,
-                max_tables=self.rag.max_tables,
+                max_tables=None,  # never drop tables (recall-first)
                 per_table_columns=self.rag.per_table_columns,
             )
 

@@ -1,9 +1,8 @@
 """Standalone 3-stage SQL verification (the Reviewer logic).
 
-Extracted from ``workflow.graph.verification_node`` so both the LangGraph pipeline
-and the multi-agent orchestrator run **identical** verification semantics, and so
-the Reviewer can be imported without pulling in the heavy generator stack (this
-module depends only on the lightweight verifier classes: sqlglot + stdlib).
+Used by the AEGIS v1 orchestrator's Reviewer stage. Kept independent of the
+heavy generator stack (depends only on the lightweight verifier classes:
+sqlglot + stdlib) so it is importable in offline tests.
 """
 
 from typing import Optional

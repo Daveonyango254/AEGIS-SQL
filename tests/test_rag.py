@@ -193,7 +193,7 @@ def test_pipeline_end_to_end_budget_and_grounding():
 
         schema = _schema()
         cfg = AEGISConfig()
-        cfg.rag.rerank = False  # no model in this test
+        cfg.retrieval.rerank = False  # no model in this test
         pipe = MultiStepRetriever(_FakeScoredRetriever(schema), schema, cfg)
         q = Query(text='How many "Female" clients are there?',
                   language=Language.ENGLISH, database_id="financial")

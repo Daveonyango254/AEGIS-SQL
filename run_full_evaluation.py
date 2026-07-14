@@ -39,7 +39,8 @@ def run_prediction_generation(
     stratify: bool,
     output_name: str,
     config_path: str,
-    bird_path: str
+    bird_path: str,
+    workers: int = 4,
 ) -> Path:
     """Run prediction generation step.
 
@@ -73,6 +74,8 @@ def run_prediction_generation(
 
     if stratify:
         cmd.append("--stratify")
+
+    cmd.extend(["--workers", str(workers)])
 
     logger.info(f"Running command: {' '.join(cmd)}")
     logger.info("\n" + "=" * 80)
@@ -327,7 +330,7 @@ def compute_three_axis_metrics(
                     original_tokens=[],  # Not stored in predictions
                     placeholder_map={},  # Not stored in predictions
                     num_substitutions=num_subs,
-                    epsilon=config.privacy.epsilon
+                    epsilon=0.0  # privacy isolated in AEGIS v1
                 )
             )
         else:
@@ -343,10 +346,12 @@ def compute_three_axis_metrics(
             )
 
     # Initialize metrics calculator
+    # Privacy is ISOLATED in AEGIS v1 (epsilon 0); cost constants mirror
+    # agents.orchestrator's reporting constants.
     calculator = MetricsCalculator(
-        epsilon=config.privacy.epsilon,
-        remote_token_cost=config.cost.remote_token_cost,
-        local_cost=config.cost.local_compute_cost
+        epsilon=0.0,
+        remote_token_cost=1.5e-05,
+        local_cost=1e-04,
     )
 
     # Compute privacy loss
@@ -519,6 +524,12 @@ def main():
         default=None,
         help="Use existing predictions file (skips step 1)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Concurrent query workers for prediction generation (default: 4)",
+    )
 
     args = parser.parse_args()
 
@@ -560,7 +571,8 @@ def main():
                 stratify=args.stratify,
                 output_name=args.output_name,
                 config_path=args.config,
-                bird_path=args.bird_path
+                bird_path=args.bird_path,
+                workers=args.workers,
             )
 
         # Determine number of queries from predictions file

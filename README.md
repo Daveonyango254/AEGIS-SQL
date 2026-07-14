@@ -1,426 +1,181 @@
-# AEGIS-SQL: Three-Axis Constrained Optimization for Hybrid NL2SQL
+# AEGIS-SQL
 
-A production-grade implementation of **AEGIS-SQL**, a hybrid natural language to SQL system that balances **utility (accuracy)**, **privacy**, and **cost** through intelligent routing, differential privacy abstraction, and neuro-symbolic verification.
+A **corrective self-consistency** text-to-SQL system for the BIRD benchmark:
+one simple pipeline that runs a local 7B SQL specialist, a remote LLM, or an
+**ensemble of both**, and converts a diverse candidate pool into a single
+high-accuracy answer through execution voting and merge-revision.
+
+Design principles: **highest accuracy, least complexity, any GPU.** One
+orchestrator, one ~80-line config, no GPU-specific dependencies. (The research
+repo also parks the paper's differential-privacy abstraction and
+content-independent router — isolated from this pipeline, reactivatable for the
+privacy study.)
 
 ---
 
-## Architecture Overview
-
-**Agent Names:** In the system architecture, components are referred to by their agent names:
-- **Query Planner Agent** → Encompasses `AmbiguityResolver` (query disambiguation) + `SchemaRetriever` (schema extraction) + `ContentIndependentRouter` (routing logic)
-- **Reviewer Agent** → Encompasses `GrammarVerifier`, `SchemaVerifier`, `ExecutionVerifier`, `FeedbackGenerator` classes
+## Final Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         AEGIS-SQL WORKFLOW                           │
-└─────────────────────────────────────────────────────────────────────┘
-
-Input: Natural Language Query + Database Schema
-   │
-   ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                    QUERY PLANNER AGENT                            │
-│                                                                   │
-│  Step 0: Ambiguity Resolution (Optional)                          │
-│  └─> Detect temporal/schema/underspecified ambiguities            │
-│      • Auto-resolve with defaults, OR                            │
-│      • Request user clarification                                │
-│                                                                   │
-│  Step 1: Schema Extraction                                        │
-│  └─> Retrieve relevant schema elements via multilingual          │
-│      embeddings (BGE-M3 RAG)                                      │
-│                                                                   │
-│  Step 2: Content-Independent Routing                              │
-│  └─> Route based on query complexity & cost constraints           │
-│      Decision: LOCAL (FSLM) or REMOTE (FLLM)                      │
-└───────────────────────────────────────────────────────────────────┘
-           │
-           ├─────────────────────┬──────────────────────┐
-           │                     │                      │
-           ▼ LOCAL               ▼ REMOTE              │
-    ┌─────────────┐      ┌──────────────┐             │
-    │   FSLM      │      │ Abstraction  │             │
-    │ (CodeLlama/ │      │ (DP ε-mech)  │             │
-    │ DeepSeek)   │      └──────┬───────┘             │
-    └──────┬──────┘             │                     │
-           │                    ▼                     │
-           │             ┌──────────────┐             │
-           │             │    FLLM      │             │
-           │             │ (GPT-4/Claude)│            │
-           │             └──────┬───────┘             │
-           │                    │                     │
-           │                    ▼                     │
-           │             ┌──────────────┐             │
-           │             │Reconstruction│             │
-           │             │(Placeholders)│             │
-           │             └──────┬───────┘             │
-           │                    │                     │
-           └────────────────────┴─────────────────────┘
-                                │
-                                ▼
-                  ┌──────────────────────┐
-                  │  REVIEWER AGENT      │
-                  │  (3-stage)           │
-                  │  • Grammar           │
-                  │  • Schema            │
-                  │  • Execution         │
-                  └──────────┬───────────┘
-                             │
-                             ▼
-                    Output: Verified SQL
+                          Question + Evidence
+                                  │
+             ┌────────────────────▼─────────────────────┐
+             │ 1. SCHEMA STAGE (recall-first)           │
+             │  full schema DDL (≤120 cols, the default │
+             │  for BIRD) or multi-step linked retrieval│
+             │  + value grounding: question literals    │
+             │  located IN the DB, exact stored forms   │
+             └────────────────────┬─────────────────────┘
+                                  │
+        ┌─────────────────────────▼──────────────────────────┐
+        │ 2. CANDIDATE POOL     (mode: local|remote|ensemble) │
+        │  local:  CSC 7B, native OmniSQL prompt,             │
+        │          n sampled candidates (OOM-safe chunks)     │
+        │  remote: LLM, direct + query-plan strategies        │
+        │  (arms run CONCURRENTLY in ensemble mode)           │
+        └─────────────────────────┬───────────────────────────┘
+                                  │
+             ┌────────────────────▼─────────────────────┐
+             │ 3. EXECUTION-VOTE GROUPING               │
+             │  run every candidate; group by result    │
+             │  set; majority vote (BIRD EX semantics)  │
+             └────────────────────┬─────────────────────┘
+                                  │ top-2 groups disagree?
+             ┌────────────────────▼─────────────────────┐
+             │ 4. CSC MERGE-REVISION                    │
+             │  merge model sees both drafts + their    │
+             │  execution results (reduced schema) and  │
+             │  writes the corrected SQL → re-vote      │
+             └────────────────────┬─────────────────────┘
+                                  │
+             ┌────────────────────▼─────────────────────┐
+             │ 5. JUDGE tie-break → bounded REFINE      │
+             │    (error/empty results only)            │
+             └────────────────────┬─────────────────────┘
+                                  │
+             ┌────────────────────▼─────────────────────┐
+             │ 6. REVIEWER: grammar → schema → execution│
+             └────────────────────┬─────────────────────┘
+                                  ▼
+                    predictions.jsonl (winner_arm logged)
 ```
 
----
+**Why this shape** (each stage earned its place empirically):
+- *Recall-first schema*: dropping one needed table caps a query's EX at 0 —
+  measured on BIRD (`financial`), and confirmed by the schema-linking literature.
+- *Diverse pool + execution voting*: the most reliable test-time-compute lever
+  (CHASE-SQL, CSC-SQL); ensemble diversity across model families raises the
+  pool's oracle ceiling.
+- *Merge-revision*: plain voting fails exactly when the majority is wrong; the
+  CSC merge checkpoint was RL-trained to adjudicate the top-2 disagreeing
+  groups from their execution evidence (CSC-SQL 7B: 69.19% BIRD-dev).
 
-## Key Features
+## Repo layout
 
-### 🔒 **Privacy-Preserving**
-- **Differential Privacy (DP) Abstraction**: Token-level ε-DP via exponential mechanism
-- **Zero Leakage Local Path**: Queries routed to local FSLM never expose sensitive data
-- **Formal Guarantees**: Privacy loss bounded by ℒ_priv = ε × E[|prompt|] × Pr(r=remote)
+```
+agents/          orchestrator, schema linker, reviewer   (the pipeline)
+generator/       SLM + LLM wrappers, CSC engine, SQL postprocessing
+prompts/         OmniSQL + strategy + judge prompt builders (pure, tested)
+retriever/       hybrid retrieval, value index, fusion, multi-step pipeline
+verifier/        grammar / schema / execution verification
+evaluation/      BIRD loader, EX/VES evaluators, retrieval analyzer
+workflow/        model cache (thread-safe), embedding cache, costing
+abstraction/, router/   parked privacy components (paper; not in this pipeline)
+config.yaml      the single config (~80 lines)
+```
 
-### 💰 **Cost-Optimized**
-- **Content-Independent Routing**: Automatic LOCAL/REMOTE decision based on complexity
-- **Budget Controls**: Per-query cost limits with configurable thresholds
-- **Hybrid Architecture**: Use expensive remote LLMs only when necessary
-
-### 🎯 **High Accuracy**
-- **3-Stage Neuro-Symbolic Verification**: Grammar → Schema → Execution
-- **Multilingual Support**: English, Spanish, Korean, Chinese, Swahili
-- **State-of-the-Art Models**: CodeLlama, DeepSeek-Coder (local), GPT-4o/Claude (remote)
-
----
-
-## Quick Start
-
-### 1. Installation
+## Setup
 
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/aegis_sql.git
-cd aegis_sql
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up API keys
-cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY or ANTHROPIC_API_KEY
+pip install -r requirements.txt          # torch, transformers, sqlglot, ...
+echo "OPENAI_API_KEY=sk-..." >> .env     # remote/ensemble modes
+echo "HF_HUB_TOKEN=hf_..."   >> .env     # faster model downloads
+# BIRD dev set under data/bird/ (dev.json + dev_databases/)
 ```
 
-### 2. Configuration
+**Hardware**: any GPU with ≥20GB VRAM runs the default (a single 7B fp16
+serves generation and merge-revision). No vLLM, no quantization, no
+GPU-specific setup. A model that doesn't fit fails loudly at load — it never
+silently offloads to CPU. Dual-checkpoint upgrade for 48GB GPUs: point
+`models.generator` at the GRPO checkpoint in `config.yaml`.
 
-Edit `config.yaml` to customize behavior:
-
-```yaml
-# Force local-only mode (no API costs, zero privacy leakage)
-router:
-  force_local: true
-
-# OR force remote-only mode (maximum accuracy)
-router:
-  force_remote: true
-
-# OR hybrid mode (automatic routing)
-router:
-  threshold_complexity: 0.7  # 0-1 scale
-```
-
-### 3. Run Workflow
-
-```python
-from aegis_sql import AEGISConfig
-from aegis_sql.workflow import build_aegis_graph
-from aegis_sql.types import Query, Language
-
-# Load configuration
-config = AEGISConfig.from_yaml("config.yaml")
-
-# Build workflow graph
-graph = build_aegis_graph(config)
-
-# Execute query
-query = Query(
-    text="Find all employees hired after 2020",
-    language=Language.ENGLISH,
-    database_id="company_db"
-)
-
-result = graph.invoke({
-    "query": query,
-    "database_id": "company_db"
-})
-
-print(result["sql"].text)
-```
-
----
-
-## Configuration Modes
-
-### 🏠 **Local-Only Mode** (Zero Privacy Leakage, No API Costs)
-```yaml
-router:
-  force_local: true
-```
-OR
-```yaml
-cost:
-  budget_per_query: 0.0
-```
-
-### ☁️ **Remote-Only Mode** (Maximum Accuracy)
-```yaml
-router:
-  force_remote: true
-```
-OR
-```yaml
-router:
-  threshold_complexity: 0.0
-```
-
-### 🔄 **Hybrid Mode** (Automatic Routing - DEFAULT)
-```yaml
-router:
-  threshold_complexity: 0.7  # Queries >= 0.7 complexity → REMOTE
-cost:
-  budget_per_query: 0.01  # $0.01 per query
-```
-
-### 🚫 **Disable Abstraction** (WARNING: Sends sensitive data to remote LLM!)
-```yaml
-privacy:
-  abstraction_enabled: false
-  reconstruction_enabled: false
-```
-OR
-```yaml
-privacy:
-  epsilon: 0.0
-```
-
----
-
-## Evaluation
-
-### Full Pipeline Evaluation
-
-Run the complete BIRD-dev evaluation pipeline with all metrics (EX, VES, privacy, cost, latency):
+## Running evaluations
 
 ```bash
-# Quick test with 2 queries (recommended for testing setup)
-python run_full_evaluation.py --bird_path data/bird --num_queries 2 --seed 42
+# 100-query stratified sample (seed-fixed, reproducible)
+python run_full_evaluation.py --num_queries 100 --seed 42 --stratify --output_name exp_100
 
-# Test with 10 queries
-python run_full_evaluation.py --bird_path data/bird --num_queries 10 --seed 42
+# Full BIRD-dev (1,534 queries)
+python run_full_evaluation.py --output_name full_dev
 
-# Sample 100 queries
-python run_full_evaluation.py --bird_path data/bird --num_queries 100 --seed 42 --output_name exp_100
-
-# Full BIRD-dev (1534 queries)
-python run_full_evaluation.py --bird_path data/bird --output_name full_bird_dev
-
-# Use existing predictions (skip generation, only compute metrics)
-python run_full_evaluation.py --bird_path data/bird --predictions_file evaluation/output/exp/predictions.jsonl
+# Retrieval diagnostics on any run
+python evaluation/analyze_retrieval.py evaluation/output/exp_100/predictions.jsonl
 ```
 
-**What it does:**
-1. **Step 1**: Generates SQL predictions using AEGIS-SQL workflow
-2. **Step 2**: Computes **EX (Execution Accuracy)** - executes predicted and ground truth SQL, compares results
-3. **Step 3**: Computes **VES (Valid Efficiency Score)** - measures query efficiency with timing
-4. **Step 4**: Computes three-axis metrics (privacy loss, cost, latency)
-5. **Step 5**: Generates comprehensive evaluation report
+Switch what you're testing with one key in `config.yaml`:
 
-### Prediction Generation
+| `mode:` | Pool | Use |
+|---|---|---|
+| `local` | 7B SLM only | zero API cost, the local-model story |
+| `remote` | remote LLM only | model-alone baseline |
+| `ensemble` | both, pooled | maximum accuracy |
 
-**Path A: Serial Generation (Standard)**
+**Throughput**: queries run through a worker pool (`--workers`, default 4);
+the GPU serializes internally while remote API calls, SQLite execution voting,
+and verification overlap with it. Local decode time scales linearly with
+`generation.local_candidates` (default 6 — pass@k saturates near 8 and the
+remote arm adds diversity, so this keeps most of the accuracy at ~1/3 the GPU
+time of 16). Rough guide at the defaults: A40-class GPU ≈ 100 queries in
+10-15 min, full 1,534 ≈ 2.5-3.5 h; a 20GB workstation card ≈ 2x those times
+(drop `local_candidates` to 4 if you must hit hard time budgets on it).
+`remote` mode is network-bound and far faster. Accuracy presets: 16
+(thorough) and 64 + merge 8 (CSC paper-faithful).
 
-Generate predictions without running full evaluation metrics:
+## Reading results
+
+Every run writes to `evaluation/output/<name>/`: `predictions.jsonl`,
+`ex_results.txt` (EX by difficulty), `ves_results.txt`, `evaluation_report.json`,
+`config_snapshot.yaml`, `evaluation.log`.
+
+Each prediction records **which arm produced the final answer** — the routing
+record for analyzing local-vs-remote wins in ensemble mode:
+
+```json
+{"winner_arm": "merge",        // local | remote | merge | refine
+ "candidates_local": 6, "candidates_remote": 8, ...}
+```
 
 ```bash
-# Generate SQL for 10 test queries
-python run_bird_evaluation.py --bird_path data/bird --num_queries 10 --seed 42
-
-# Generate for 100 queries with custom output name
-python run_bird_evaluation.py --bird_path data/bird --num_queries 100 --seed 42 --output_name exp_100
-
-# Full BIRD-dev dataset (all 1534 queries)
-python run_bird_evaluation.py --bird_path data/bird --output_name full_bird_dev
+# Arm-win breakdown of a run
+python - <<'EOF'
+import json, collections
+arms = collections.Counter(json.loads(l)["winner_arm"]
+                           for l in open("evaluation/output/exp_100/predictions.jsonl"))
+print(dict(arms))
+EOF
 ```
 
-**Path B: Parallel Generation (Fast - GPU Evaluation)**
+## Key config knobs (`config.yaml`)
 
-For faster generation of all 1534 queries (~30-90 min vs 1-2 hr), use parallel execution:
+| Key | Default | Meaning |
+|---|---|---|
+| `mode` | `ensemble` | candidate pool: local / remote / ensemble |
+| `generation.local_candidates` | 6 | SLM samples per query (16 thorough, 64 = CSC paper preset) |
+| `generation.remote_candidates` | 4 | remote samples per strategy (0 = off) |
+| `csc.enabled` / `csc.merge_candidates` | true / 4 | merge-revision stage (8 = paper preset) |
+| `retrieval.schema_mode` | `auto` | full schema ≤120 cols, linked above |
+| `selection.judge` | `auto` | tie-break on exact vote ties |
+| `refine.rounds` | 1 | execution-feedback repair on error/empty |
+
+## Tests
 
 ```bash
-# Step 1: Generate predictions in parallel with checkpoint/resume
-python run_parallel_predictions.py \
-  --bird_path data/bird \
-  --out evaluation/output/full_bird_dev/predictions.jsonl \
-  --concurrency 12
-
-# Step 2: Compute metrics from predictions
-python run_full_evaluation.py \
-  --bird_path data/bird \
-  --predictions_file evaluation/output/full_bird_dev/predictions.jsonl
+for t in tests/test_*.py; do python "$t"; done   # offline; no GPU/API needed
 ```
 
-**Concurrency Tuning:**
-- Set `--concurrency` based on your **GPT-4o TPM (tokens-per-minute) limit**
-- Start with 8-12 for testing
-- The bottleneck is API rate limits (not GPU) for REMOTE queries
-- Local SLM queries serialize on GPU but are fast for 1.5B models
-- Parallelism overlaps REMOTE API waits and SQL execution verification
+## References
 
-**Checkpoint/Resume:**
-- If generation is interrupted, rerun the same command
-- Automatically skips queries already in predictions.jsonl
-- Protects against transient 429 rate limit errors with exponential backoff
-
-### Metrics Computed
-
-**BIRD Benchmark Metrics:**
-- **EX (Execution Accuracy)**: Percentage of queries returning correct results by executing both predicted and ground truth SQL on actual databases
-- **VES (Valid Efficiency Score)**: `sqrt(gt_time / pred_time) × 100` - measures both correctness and query efficiency
-
-**Three-Axis Metrics:**
-- **Privacy Loss**: ℒ_priv = ε × E[|prompt|] × Pr(r=remote)
-- **Cost per Query**: Average USD cost (API usage)
-- **Latency**: End-to-end processing time (SQL generation)
-
-**All metrics broken down by difficulty**: Simple, Moderate, Challenging, Overall
-
-### Output Files
-
-Results saved to `evaluation/output/{experiment_name}/`:
-```
-evaluation/output/{experiment_name}/
-├── predictions.jsonl           # Per-query predictions and metrics
-├── evaluation_report.json      # Aggregated metrics summary
-├── ex_results.txt             # EX evaluation details
-├── ex_results_latency.json    # EX execution timing stats
-├── ves_results.txt            # VES evaluation details
-├── ves_results_latency.json   # VES timing stats
-├── config_snapshot.yaml       # Configuration used
-├── evaluation.log             # Detailed logs
-└── full_evaluation.log        # Full pipeline logs
-```
-
----
-
-## Project Structure
-
-```
-aegis_sql/
-├── __init__.py
-├── config.py                    # Pydantic configuration models
-├── config.yaml                  # Main configuration file
-├── aegis_types.py               # Core type definitions
-├── query_planner/               # Query disambiguation & planning
-│   └── ambiguity_resolver.py   # Detect & resolve query ambiguities
-├── retriever/                   # Schema extraction (RAG)
-│   ├── schema_retriever.py
-│   └── embedding_models.py
-├── router/                      # Content-independent routing
-│   └── content_independent_router.py
-├── abstraction/                 # DP abstraction & reconstruction
-│   ├── dp_abstractor.py
-│   ├── placeholder_vocab.py
-│   ├── reconstruction.py
-│   └── sensitivity_policy.py
-├── generator/                   # SQL generation
-│   ├── slm_generator.py        # Local FSLM (CodeLlama, DeepSeek)
-│   └── llm_fallback.py         # Remote FLLM (GPT-4, Claude)
-├── verifier/                    # Neuro-symbolic verification
-│   ├── grammar_verifier.py
-│   ├── schema_verifier.py
-│   ├── execution_verifier.py
-│   └── feedback_generator.py
-├── workflow/                    # LangGraph orchestration
-│   ├── graph.py                # Workflow graph definition
-│   └── state.py                # State management
-└── evaluation/                  # Evaluation framework
-    ├── evaluator_ex.py         # EX metric
-    ├── evaluator_ves.py        # VES metric
-    ├── metrics.py              # Three-axis metrics
-    └── README.md               # Evaluation instructions
-```
-
----
-
-## Research Paper
-
-Based on: **"Three-Axis Constrained Optimization for Hybrid NL2SQL"**
-
-**Key Contributions:**
-1. **Router-Before-Abstraction Architecture**: Local path has zero privacy leakage
-2. **Content-Independent Routing**: Theorem 1 - Privacy amplification via hybrid routing
-3. **Multilingual DP Abstraction**: Language-agnostic placeholder vocabulary
-4. **Three-Axis Optimization**: Utility, Privacy, Cost trade-offs
-
----
-
-## Implementation Status
-
-### ✅ Fully Implemented Components
-
-**Core System:**
-- ✅ Configuration system with YAML and environment variables
-- ✅ Type definitions (Query, SQL, Schema, etc.)
-- ✅ LangGraph workflow orchestration
-- ✅ State management and routing logic
-
-**Query Planner (Schema Retrieval):**
-- ✅ Schema retriever with pass-through mode (returns all schema elements)
-- ✅ Support for multilingual embeddings (BGE-M3 ready)
-- ⚙️ Future: Fine-tuned embeddings and FAISS indexing
-
-**Content-Independent Router:**
-- ✅ Complexity-based routing (local/remote/hybrid modes)
-- ✅ Cost budget enforcement
-- ✅ Force local/remote override options
-
-**SQL Generation:**
-- ✅ Local SLM generator with HuggingFace models (tested with cycloneboy/SLM-SQL-1.5B)
-- ✅ LoRA adapter support
-- ✅ Remote LLM fallback (OpenAI GPT-4o, Anthropic Claude)
-- ✅ SQL extraction and formatting
-
-**Privacy (DP Abstraction & Reconstruction):**
-- ✅ Token-level DP abstraction with exponential mechanism
-- ✅ Sensitivity detection (PII, proprietary data)
-- ✅ Placeholder vocabulary with semantic categories
-- ✅ Reconstruction with substitution tracking
-- ⚙️ Future: Advanced NER for better entity detection
-
-**Reviewer (Verification):**
-- ✅ Grammar verification (sqlglot parser)
-- ✅ Schema verification (element validation)
-- ✅ Execution verification with timeout and sampling
-- ✅ Feedback generation for refinement
-
-**Evaluation Pipeline:**
-- ✅ BIRD-dev dataset loader with schema extraction
-- ✅ Stratified sampling by difficulty
-- ✅ Full evaluation orchestration (predictions + metrics)
-- ✅ EX and VES metric computation
-- ✅ Three-axis metrics (privacy, cost, latency)
-- ✅ Comprehensive logging and reporting
-
-### 🎯 Testing Status
-- ✅ E2E workflow tested with real SLM inference
-- ✅ 10-query evaluation completed successfully
-- ✅ All verifiers passing on generated SQL
-- ✅ Zero privacy loss and cost on local path verified
-
-### ⚙️ Future Enhancements
-- Advanced schema retrieval with fine-tuned embeddings
-- FAISS/vector database integration for large schemas
-- Enhanced NER for abstraction
-- Multi-turn refinement with feedback loop
-
----
+CSC-SQL (arXiv:2505.13271) · CHASE-SQL (arXiv:2410.01943) · OmniSQL template
+(RUCKBReasoning/OmniSQL) · BIRD benchmark (bird-bench.github.io)
 
 ## Citation
 
@@ -432,14 +187,6 @@ Based on: **"Three-Axis Constrained Optimization for Hybrid NL2SQL"**
 }
 ```
 
----
-
 ## License
 
 MIT License
-
----
-
-## Contact
-
-For questions or issues, please open an issue on GitHub or contact the MINDS Lab.

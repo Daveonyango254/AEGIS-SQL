@@ -1,12 +1,7 @@
-"""LangGraph workflow orchestration.
+"""Shared runtime services: the model cache and embedding persistence.
 
-Defines the end-to-end StateGraph with conditional routing and retry logic.
-
-Sprint Assignment: Integrates all sprints 1-6
-References: Build strategy Section 9 (architectural diagram)
+The LangGraph pipeline that used to live here was removed in AEGIS v1 — the
+single per-query pipeline is ``agents.MultiAgentOrchestrator``.
 """
 
-from workflow.state import AEGISState
-from workflow.graph import build_aegis_graph
-
-__all__ = ["AEGISState", "build_aegis_graph", "run_aegis_workflow"]
+__all__ = ["model_cache", "embedding_cache", "costing"]

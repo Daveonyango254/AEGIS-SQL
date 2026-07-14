@@ -21,6 +21,13 @@ from aegis_types import Query, SchemaElement, SQL
 from prompts.prompt_manager import get_prompt_manager
 from generator.sql_postprocess import finalize_sql
 
+# One GPU, many worker threads: all local decode calls serialize on this lock so
+# the evaluation harness can overlap CPU stages (execution voting, verification)
+# and remote API calls of other queries with the GPU work of the current one.
+import threading
+
+_GPU_LOCK = threading.Lock()
+
 # Default system prompt used when templates.yaml does not define one.
 _DEFAULT_SLM_SYSTEM_PROMPT = (
     "You are an expert text-to-SQL generator for the SQLite/BIRD benchmark. "
@@ -90,15 +97,39 @@ class SLMGenerator:
             _tf_ver = tuple(int(p) for p in transformers.__version__.split(".")[:2])
             dtype_kwarg = "dtype" if _tf_ver >= (4, 56) else "torch_dtype"
 
-            # Load model
-            self.model = AutoModelForCausalLM.from_pretrained(
-                config.model,
+            load_kwargs = dict(
                 device_map=config.device,
                 token=hf_token,
                 cache_dir=str(cache_dir),
                 trust_remote_code=config.trust_remote_code,
                 **{dtype_kwarg: dtype},
             )
+
+            # Refuse silent CPU offload: device_map=auto spills layers to CPU RAM
+            # when VRAM is short, which makes inference 10-100x slower and looks
+            # like a hang. Capping max_memory to the GPU makes the shortfall fail
+            # LOUDLY at load time instead.
+            if (
+                not getattr(config, "allow_cpu_offload", False)
+                and config.device in ("auto", "cuda")
+                and torch.cuda.is_available()
+            ):
+                free_bytes, _total = torch.cuda.mem_get_info(0)
+                load_kwargs["max_memory"] = {0: int(free_bytes * 0.95), "cpu": 0}
+
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(config.model, **load_kwargs)
+            except ValueError as e:
+                if "max_memory" not in load_kwargs:
+                    raise
+                raise RuntimeError(
+                    f"{config.model} does not fit in the available GPU memory and CPU "
+                    "offload is disabled (it would be 10-100x slower). Remedies: keep "
+                    "models.generator == models.merger (single 7B — the default); OR "
+                    "use a 48GB GPU (a RunPod A40 is typically cheaper than 24GB PRO "
+                    "cards) for the dual-checkpoint setup; OR set "
+                    "models.allow_cpu_offload: true to accept the slowdown."
+                ) from e
 
             # Load LoRA adapter if specified
             if config.adapter_path:
@@ -282,9 +313,8 @@ class SLMGenerator:
                 temperature=0.0, num_return_sequences=1,
             )
             if n > 1 and temperature > 0:
-                texts.extend(self._run_generation(
-                    inputs, max_tokens=max_tokens, do_sample=True,
-                    temperature=temperature, num_return_sequences=n - 1,
+                texts.extend(self._sample_chunked(
+                    inputs, n - 1, max_tokens=max_tokens, temperature=temperature
                 ))
             if raw:
                 return [t.strip() for t in texts if t and t.strip()]
@@ -292,6 +322,43 @@ class SLMGenerator:
         except Exception as e:
             logger.error(f"SLM complete() failed: {e}")
             return []
+
+    def _sample_chunked(
+        self, inputs, n: int, max_tokens: int, temperature: float
+    ) -> List[str]:
+        """Draw ``n`` temperature samples in memory-bounded chunks.
+
+        A single generate() with num_return_sequences=n allocates n KV caches at
+        once — the exact OOM that silently killed the local arm on 24GB GPUs.
+        Independent samples are statistically identical whether drawn in one
+        batch or several, so chunking changes memory use, not the distribution.
+        On CUDA OOM the chunk size halves (floor 1) and the draw is retried.
+        """
+        chunk = max(1, getattr(self.config, "chunk_size", 4))
+        texts: List[str] = []
+        remaining = n
+        while remaining > 0:
+            batch = min(chunk, remaining)
+            try:
+                texts.extend(self._run_generation(
+                    inputs, max_tokens=max_tokens, do_sample=True,
+                    temperature=temperature, num_return_sequences=batch,
+                ))
+                remaining -= batch
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if chunk == 1:
+                    logger.error(
+                        f"CUDA OOM even at chunk size 1 — returning {len(texts)}/{n} "
+                        "samples. The model barely fits; use a larger GPU or "
+                        "models.quantization: 4bit."
+                    )
+                    break
+                chunk = max(1, chunk // 2)
+                logger.warning(
+                    f"CUDA OOM while sampling; halving chunk size to {chunk} and retrying"
+                )
+        return texts
 
     def _build_inputs(
         self,
@@ -375,7 +442,8 @@ class SLMGenerator:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.95
 
-        with torch.no_grad():
+        # Serialize GPU decode across worker threads (see _GPU_LOCK note above).
+        with _GPU_LOCK, torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
         input_length = inputs["input_ids"].shape[1]

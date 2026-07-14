@@ -18,7 +18,7 @@ is a BFS per kept-table pair on the FK graph (both tiny for BIRD schemas).
 """
 
 from collections import defaultdict, deque
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # Reciprocal Rank Fusion constant (Cormack et al.): dampens the head so one
 # sub-query cannot dominate, while agreement across sub-queries accumulates.
@@ -127,15 +127,18 @@ def adaptive_budget(
     scores: Dict[str, float],
     value_hit_columns: Set[str],
     schema,
-    max_tables: int = 4,
+    max_tables: Optional[int] = None,
     per_table_columns: int = 10,
 ) -> List[str]:
-    """Select the final ordered column slice under an adaptive table budget.
+    """Select the final ordered column slice under an adaptive budget.
 
-    Table selection: rank tables by total member-column score; always keep
-    tables holding a value hit; cap at ``max_tables``; then add FK bridge tables
-    so every kept pair is join-connected. Column selection per kept table: value
-    hits + primary/foreign-key columns (join keys must never be dropped) + the
+    RECALL-FIRST (measured lesson: capping tables at 4 dropped ground-truth
+    tables on FK-maze databases and cost 14/100 queries outright): by default
+    (``max_tables=None``) EVERY scored table is kept and noise is controlled
+    purely through the per-table COLUMN cap. A table cap can still be set for
+    ablations; value-hit tables are always exempt from it, and FK bridge tables
+    are added so every kept pair is join-connected. Column selection per table:
+    value hits + primary/foreign-key columns (join keys are never dropped) + the
     top-scored columns up to ``per_table_columns``.
 
     Returns column names ordered by (table evidence, column score) — the order
@@ -155,10 +158,9 @@ def adaptive_budget(
     ranked_tables = sorted(table_score, key=lambda t: -table_score[t])
     kept: Set[str] = set()
     for t in ranked_tables:
-        if len(kept) >= max_tables and t not in value_tables:
+        if max_tables is not None and len(kept) >= max_tables and t not in value_tables:
             continue
-        if t in value_tables or len(kept) < max_tables:
-            kept.add(t)
+        kept.add(t)
 
     # Join connectivity: bridge tables enter with only their key columns.
     adj = _fk_adjacency(getattr(schema, "foreign_keys", None))

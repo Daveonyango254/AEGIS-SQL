@@ -1,9 +1,8 @@
-"""Logic + wiring tests for the multi-agent booster.
+"""Wiring tests for the AEGIS v1 orchestrator (offline, mocked models).
 
-Runs offline by stubbing the heavy optional deps (torch/transformers/openai/
-anthropic/sqlglot) and faking the two ``workflow`` helpers the orchestrator pulls,
-so we can exercise the *real* selector/refiner (against a temp SQLite DB) and the
-*real* orchestrator wiring with a mocked model cache.
+Verifies: local-mode candidate flow through CSC selection, ensemble pooling
+(local + remote candidates deduplicated), the merge stage being invoked on
+disagreement, and the prediction-contract dict the evaluation harness reads.
 
 Run with: python tests/test_agents.py
 """
@@ -18,7 +17,7 @@ import types
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-# --- stub heavy/unavailable modules before importing the agents --------------
+# --- stub heavy deps + the model cache before importing the orchestrator ------
 _Err = type("_Err", (Exception,), {})
 
 
@@ -35,205 +34,214 @@ _stub("openai", Client=object, RateLimitError=_Err, APITimeoutError=_Err, APICon
 _stub("anthropic", Anthropic=object, RateLimitError=_Err, APITimeoutError=_Err, APIConnectionError=_Err)
 _stub("sqlglot", parse_one=lambda *a, **k: None, ParseError=_Err)
 
-# Fake the workflow helpers so importing the orchestrator does NOT pull the
-# langgraph pipeline (workflow/__init__ eagerly imports it). compute_cost is the
-# real one-liner; get_cache returns whatever the test installs.
-_wf = types.ModuleType("workflow"); _wf.__path__ = []
-sys.modules["workflow"] = _wf
-_cost = types.ModuleType("workflow.costing")
-_cost.compute_cost = lambda source, tok, rc, lc: (tok * rc if source == "llm" else lc)
-sys.modules["workflow.costing"] = _cost
 _mc = types.ModuleType("workflow.model_cache")
 _mc._cache = None
 _mc.get_cache = lambda: _mc._cache
+_wf = types.ModuleType("workflow"); _wf.__path__ = []
+sys.modules["workflow"] = _wf
 sys.modules["workflow.model_cache"] = _mc
 
 from aegis_types import Language, Query, RoutingDecision, Schema, SchemaElement  # noqa: E402
 from config import AEGISConfig  # noqa: E402
-from agents.context import RunContext  # noqa: E402
-from agents.generator import CandidateGeneratorAgent  # noqa: E402
-from agents.selector import SelectorAgent  # noqa: E402
-from agents.refiner import RefinerAgent  # noqa: E402
 from agents.orchestrator import MultiAgentOrchestrator  # noqa: E402
 
 
-# --- fixtures ----------------------------------------------------------------
+# --- fixtures -------------------------------------------------------------------
 
 def _make_db():
-    """A temp SQLite DB with table t(x) holding rows 1,2,3."""
     fd, path = tempfile.mkstemp(suffix=".sqlite")
     os.close(fd)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE t (x INTEGER)")
     conn.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
     return path
 
 
-def _ctx(db_path, generate_fn=None, config=None):
+def _schema():
     cols = [SchemaElement(element_type="column", name="t.x", data_type="INTEGER")]
-    schema = Schema(database_id="d", tables=["t"], columns=cols, foreign_keys=[], primary_keys={})
-    q = Query(text="rows where x is 1", language=Language.ENGLISH, database_id="d")
-    return RunContext(
-        query=q, gen_query=q, schema=schema, schema_elements=cols, db_path=db_path,
-        config=config or AEGISConfig(), source="slm",
-        generate_fn=generate_fn or (lambda *a, **k: []),
-        reconstruct_fn=lambda s: s, recon_map=None, expose_keys=True,
-    )
+    return Schema(database_id="d", tables=["t"], columns=cols,
+                  foreign_keys=[], primary_keys={"t": ["x"]})
 
 
-# --- generator: model-aware strategies ---------------------------------------
+class _FakeSLM:
+    """Scripted local model: returns queued responses per complete() call."""
 
-def test_generator_model_aware_strategies():
-    """Local path uses direct only (system_prompt None); remote adds a CoT strategy."""
-    cfg = AEGISConfig()
-    agent = CandidateGeneratorAgent(cfg)
-    seen = []
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
 
-    def gen(prompt, n, temperature, system_prompt, max_tokens=None):
-        seen.append(system_prompt)
-        return ["SELECT x FROM t"]
-
-    local = _ctx(None, gen, cfg); local.source = "slm"
-    seen.clear(); agent.generate(local)
-    assert seen == [None]                    # direct only => default system prompt
-
-    remote = _ctx(None, gen, cfg); remote.source = "llm"
-    seen.clear(); agent.generate(remote)
-    assert None in seen and any(s for s in seen)   # direct + query_plan (CoT) present
-    assert len(seen) == 2
+    def complete(self, prompt, n=1, temperature=None, system_prompt=None,
+                 max_tokens=None, raw=False):
+        self.calls.append({"prompt": prompt, "n": n, "raw": raw})
+        return self.script.pop(0) if self.script else []
 
 
-# --- selector ----------------------------------------------------------------
+class _FakeLLM:
+    def __init__(self, outs):
+        self.outs = outs
+        self.total_tokens = 100
 
-def test_selector_majority_vote():
-    db = _make_db()
-    try:
-        cands = ["SELECT x FROM t WHERE x = 1", "SELECT x FROM t WHERE x = 1", "SELECT x FROM t WHERE x = 2"]
-        best, info = SelectorAgent(AEGISConfig()).select(cands, _ctx(db))
-        assert best in cands[:2]              # majority result {(1,)} wins
-        assert info["num_agree"] >= 2
-    finally:
-        os.unlink(db)
+    def complete(self, prompt, n=1, temperature=None, system_prompt=None,
+                 max_tokens=None, raw=False):
+        return list(self.outs)
 
-
-def test_selector_judge_breaks_split_vote():
-    db = _make_db()
-    try:
-        # All three results distinct -> no majority -> judge decides.
-        cands = ["SELECT x FROM t WHERE x = 1", "SELECT x FROM t WHERE x = 2", "SELECT x FROM t WHERE x = 3"]
-        judge = lambda p, n, t, sp: ["2"]    # judge picks candidate #2
-        best, _ = SelectorAgent(AEGISConfig()).select(cands, _ctx(db), judge_fn=judge)
-        assert best == cands[1]
-    finally:
-        os.unlink(db)
-
-
-def test_selector_parse_choice():
-    parse = SelectorAgent(AEGISConfig())._parse_choice
-    assert parse("2", 3) == 1
-    assert parse("The best is 3.", 3) == 2
-    assert parse("99", 3) is None           # out of range
-    assert parse("none", 3) is None
-
-
-# --- refiner -----------------------------------------------------------------
-
-def test_refiner_repairs_empty_result():
-    db = _make_db()
-    try:
-        # Mock model: the repair attempt returns a query that yields rows.
-        gen = lambda *a, **k: ["SELECT x FROM t WHERE x = 1"]
-        out = RefinerAgent(AEGISConfig()).refine("SELECT x FROM t WHERE x = 999", _ctx(db, gen))
-        assert out == "SELECT x FROM t WHERE x = 1"
-    finally:
-        os.unlink(db)
-
-
-def test_refiner_keeps_original_when_repair_not_better():
-    db = _make_db()
-    try:
-        # Repair also returns empty -> keep the original (never accept a worse result).
-        gen = lambda *a, **k: ["SELECT x FROM t WHERE x = 888"]
-        original = "SELECT x FROM t WHERE x = 999"
-        out = RefinerAgent(AEGISConfig()).refine(original, _ctx(db, gen))
-        assert out == original
-    finally:
-        os.unlink(db)
-
-
-# --- orchestrator wiring (local path) ----------------------------------------
 
 class _FakeRetriever:
     def __init__(self, cols):
         self._cols = cols
 
-    def retrieve(self, query, **kwargs):
-        return self._cols
+    def retrieve_scored(self, q, top_k=40):
+        return [(c, 1.0) for c in self._cols]
 
-
-class _FakeSLM:
-    """Returns a fixed candidate; records that complete() was called."""
-    def __init__(self, sql):
-        self.sql = sql
-        self.calls = 0
-
-    def complete(self, prompt, n=1, temperature=None, system_prompt=None, **kwargs):
-        self.calls += 1
-        return [self.sql]
-
-    def generate(self, query, schema_elements, schema=None):
-        from aegis_types import SQL
-        return SQL(text=self.sql, dialect="sqlite", source="slm", verified=False)
-
-
-class _FakeRouter:
-    def route(self, query, schema_elements):
-        return RoutingDecision.LOCAL
+    def score_table_cards(self, q):
+        return {}
 
 
 class _FakeCache:
-    def __init__(self, cols, sql):
-        self._retriever = _FakeRetriever(cols)
-        self._slm = _FakeSLM(sql)
+    """Model cache double: SLMs keyed by model id, plus retriever/LLM."""
+
+    def __init__(self, schema, slms, llm=None):
+        self._slms = slms
+        self._llm = llm
+        self._retriever = _FakeRetriever(schema.columns)
 
     def get_schema_retriever(self, db_id, schema):
         return self._retriever
 
-    def get_router(self):
-        return _FakeRouter()
+    def get_slm(self, model_id=None):
+        return self._slms[model_id]
 
-    def get_slm_generator(self):
-        return self._slm
+    def get_llm_generator(self):
+        return self._llm
 
 
-def test_orchestrator_local_contract():
-    cols = [SchemaElement(element_type="column", name="t.x", data_type="INTEGER")]
-    schema = Schema(database_id="d", tables=["t"], columns=cols, foreign_keys=[], primary_keys={})
-    q = Query(text="all x", language=Language.ENGLISH, database_id="d")
+def _config(mode):
+    c = AEGISConfig()
+    c.mode = mode
+    c.retrieval.schema_mode = "full"
+    c.retrieval.value_retrieval = False   # keep wiring test deterministic
+    c.selection.judge = "off"
+    c.refine.rounds = 0
+    return c
 
-    # Install the mocked cache for this run.
-    _mc._cache = _FakeCache(cols, "SELECT x FROM t")
 
-    config = AEGISConfig()
-    config.agents.judge_enabled = False  # keep the wiring test deterministic
-    result = MultiAgentOrchestrator(config).run(
-        {"query": q, "schema": schema, "db_path": None, "database_id": "d"}
-    )
+CONTRACT_KEYS = ("sql", "routing_decision", "abstracted_prompt", "verification_result",
+                 "generation_source", "winner_arm", "candidates_local",
+                 "candidates_remote", "retrieved_tables", "num_retrieved_columns",
+                 "cost_usd", "privacy_loss")
 
-    # The contract dict the evaluation harness reads back.
-    for key in ("sql", "routing_decision", "abstracted_prompt", "verification_result",
-                "generation_source", "retrieved_tables", "num_retrieved_columns",
-                "cost_usd", "privacy_loss"):
-        assert key in result, f"missing contract key: {key}"
-    assert result["sql"].text == "SELECT x FROM t"
-    assert result["routing_decision"] == RoutingDecision.LOCAL
-    assert result["generation_source"] == "slm"
-    assert result["abstracted_prompt"] is None       # no abstraction on local path
-    assert result["retrieved_tables"] == ["t"]
-    assert result["num_retrieved_columns"] == 1
-    assert _mc._cache._slm.calls >= 1                 # the SLM was actually driven
+
+# --- tests ----------------------------------------------------------------------
+
+def test_local_mode_contract_and_vote():
+    db = _make_db()
+    try:
+        schema = _schema()
+        cfg = _config("local")
+        gen = _FakeSLM([["SELECT x FROM t WHERE x=1", "SELECT x FROM t WHERE x = 1",
+                         "SELECT x FROM t WHERE x=2"]])
+        _mc._cache = _FakeCache(schema, {cfg.models.generator: gen})
+        cfg.csc.enabled = False
+
+        q = Query(text="x equals one", language=Language.ENGLISH, database_id="d")
+        result = MultiAgentOrchestrator(cfg).run(
+            {"query": q, "schema": schema, "db_path": db, "database_id": "d"})
+
+        for key in CONTRACT_KEYS:
+            assert key in result, f"missing contract key {key}"
+        assert result["sql"].text == "SELECT x FROM t WHERE x=1"   # majority vote
+        assert result["routing_decision"] == RoutingDecision.LOCAL
+        assert result["generation_source"] == "slm"
+        assert result["retrieved_tables"] == ["t"]
+        assert result["abstracted_prompt"] is None
+    finally:
+        os.unlink(db)
+
+
+def test_merge_stage_adjudicates_disagreement():
+    db = _make_db()
+    try:
+        schema = _schema()
+        cfg = _config("local")
+        # Distinct ids (the config DEFAULT is single-model) so the test can
+        # observe the merge model's calls separately from the generator's.
+        cfg.models.generator = "fake/generator"
+        cfg.models.merger = "fake/merger"
+        # generator: 1-1 split between two results -> disagreement -> merge runs
+        gen = _FakeSLM([["SELECT x FROM t WHERE x=1", "SELECT x FROM t WHERE x=2"]])
+        merger = _FakeSLM([["SELECT x FROM t WHERE x=2"]])
+        _mc._cache = _FakeCache(schema, {cfg.models.generator: gen,
+                                         cfg.models.merger: merger})
+
+        q = Query(text="pick", language=Language.ENGLISH, database_id="d")
+        result = MultiAgentOrchestrator(cfg).run(
+            {"query": q, "schema": schema, "db_path": db, "database_id": "d"})
+
+        assert result["sql"].text == "SELECT x FROM t WHERE x=2"   # merge overrode
+        assert merger.calls, "merge model was never invoked"
+        # the merge prompt must carry the draft + execution-result block
+        assert "【Execution result】" in merger.calls[0]["prompt"]
+    finally:
+        os.unlink(db)
+
+
+def test_chunked_sampling_oom_backoff():
+    """_sample_chunked halves the chunk on CUDA OOM and still delivers n samples."""
+    import types as _types
+
+    # torch stub with a cuda namespace the backoff path touches.
+    torch_stub = sys.modules["torch"]
+    class _OOM(Exception):
+        pass
+    torch_stub.cuda = _types.SimpleNamespace(
+        OutOfMemoryError=_OOM, empty_cache=lambda: None)
+
+    from generator.slm_generator import SLMGenerator
+
+    gen = SLMGenerator.__new__(SLMGenerator)          # no model load
+    gen.config = _types.SimpleNamespace(chunk_size=4)
+    calls = []
+
+    def fake_run(inputs, max_tokens, do_sample, temperature, num_return_sequences=1):
+        calls.append(num_return_sequences)
+        if num_return_sequences > 2:                  # batches >2 "don't fit"
+            raise _OOM()
+        return [f"SELECT {len(calls)}"] * num_return_sequences
+
+    gen._run_generation = fake_run
+    out = SLMGenerator._sample_chunked(gen, None, n=6, max_tokens=64, temperature=0.8)
+    assert len(out) == 6                              # all samples delivered
+    assert calls[0] == 4 and max(calls[1:]) <= 2      # halved after the OOM
+
+
+def test_ensemble_pools_and_dedupes():
+    db = _make_db()
+    try:
+        schema = _schema()
+        cfg = _config("ensemble")
+        cfg.csc.enabled = False
+        cfg.generation.remote_candidates = 2
+        cfg.generation.remote_strategies = ["direct"]
+        # local emits A; remote emits A (dup) + B  -> pool = [A, B]; A wins 2-way tie? no:
+        # dedupe keeps one A; vote: A returns {x=1}, B returns {x=2}; equal 1-1 -> first group wins.
+        gen = _FakeSLM([["SELECT x FROM t WHERE x=1"]])
+        llm = _FakeLLM(["SELECT x FROM t WHERE x=1", "SELECT x FROM t WHERE x=2"])
+        _mc._cache = _FakeCache(schema, {cfg.models.generator: gen}, llm=llm)
+
+        q = Query(text="pool", language=Language.ENGLISH, database_id="d")
+        result = MultiAgentOrchestrator(cfg).run(
+            {"query": q, "schema": schema, "db_path": db, "database_id": "d"})
+
+        assert result["generation_source"] == "ensemble"
+        assert result["routing_decision"] == RoutingDecision.REMOTE
+        assert result["cost_usd"] > 0                     # local const + remote tokens
+        assert result["sql"].text.startswith("SELECT x FROM t")
+        # arm accounting: pool sizes recorded, winner attributed to a real arm
+        assert result["candidates_local"] == 1 and result["candidates_remote"] == 2
+        assert result["winner_arm"] in ("local", "remote")
+    finally:
+        os.unlink(db)
 
 
 if __name__ == "__main__":
