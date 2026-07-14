@@ -127,10 +127,16 @@ def main():
         )
         logger.info(f"✓ Loaded {len(queries)} queries")
 
-        # Build the per-query pipeline (AEGIS v1: single orchestrator).
+        # Build the per-query pipeline. 'graph' = the v2 LangGraph; 'csc' = the v1
+        # CSC merge-revision orchestrator (kept for A/B). Both return the same
+        # prediction-contract dict, so everything downstream is identical.
         logger.info("\n[3/5] Building AEGIS-SQL pipeline...")
-        orchestrator = MultiAgentOrchestrator(config)
-        logger.info(f"✓ Orchestrator ready (mode={config.mode})")
+        if getattr(config, "engine", "graph") == "graph":
+            from agents.graph import GraphOrchestrator
+            orchestrator = GraphOrchestrator(config)
+        else:
+            orchestrator = MultiAgentOrchestrator(config)
+        logger.info(f"✓ Pipeline ready (engine={config.engine}, mode={config.mode})")
 
         # Warmup model cache (pre-load models and embeddings)
         logger.info("\n[4/5] Warming up model cache...")

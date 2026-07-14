@@ -137,6 +137,32 @@ def build_prompt(
     raise ValueError(f"Unknown generation strategy: {strategy!r}")
 
 
+# --- Model-agnostic execution-feedback revision (v2 refine node) --------------
+
+_REVISION_SYSTEM_PROMPT = (
+    "You are an expert SQLite engineer. A draft query failed or returned an "
+    "empty result. Fix it using the execution feedback, keeping the question's "
+    "intent. Return ONLY the corrected query in a single ```sql code block."
+)
+
+
+def build_revision_prompt(
+    query, schema_block: str, draft_sql: str, feedback: str
+) -> Tuple[str, str]:
+    """Revision prompt for the refine node — works with ANY chat model.
+
+    Unlike the CSC merge template (which only its RL-trained checkpoint speaks),
+    this is a plain instruction: schema + question + failed draft + what the
+    database said. Returns ``(system_prompt, user_prompt)``.
+    """
+    user = (
+        f"Database schema:\n{schema_block}\n\n{_question_block(query)}\n"
+        f"Draft query:\n{draft_sql}\n\nExecution feedback: {feedback}\n\n"
+        "Write the corrected SQLite query in a ```sql block."
+    )
+    return _REVISION_SYSTEM_PROMPT, user
+
+
 # --- Pairwise / listwise selection judge (CHASE-SQL selection agent) ----------
 
 _JUDGE_SYSTEM_PROMPT = (

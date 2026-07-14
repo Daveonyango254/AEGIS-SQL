@@ -13,6 +13,9 @@ language: english
 # Candidate pool: local (SLM only) | remote (LLM only) | ensemble (both, max accuracy)
 mode: ensemble
 
+# Pipeline engine: graph (v2 LangGraph, model-agnostic) | csc (v1 merge-revision)
+engine: graph
+
 # Default: ONE 7B fp16 model serves generation AND merge-revision — fits any
 # 20GB+ GPU, no GPU-specific setup. Dual-checkpoint upgrade (48GB GPUs): set
 # generator: cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct and keep merger.

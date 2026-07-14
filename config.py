@@ -388,6 +388,12 @@ class AEGISConfig(BaseSettings):
         description="Candidate pool: 'local' (SLM only), 'remote' (LLM only), "
         "'ensemble' (pool both — maximum accuracy)",
     )
+    engine: str = Field(
+        default="graph",
+        description="Per-query pipeline: 'graph' (the v2 LangGraph: schema_link -> "
+        "generate arms -> vote -> judge -> refine loop -> verify) or 'csc' (the v1 "
+        "CSC merge-revision orchestrator)",
+    )
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
