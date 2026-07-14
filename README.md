@@ -119,13 +119,16 @@ Switch what you're testing with one key in `config.yaml`:
 | `remote` | remote LLM only | model-alone baseline |
 | `ensemble` | both, pooled | maximum accuracy |
 
-**Throughput**: queries run through a worker pool (`--workers`, default 3);
+**Throughput**: queries run through a worker pool (`--workers`, default 4);
 the GPU serializes internally while remote API calls, SQLite execution voting,
-and verification overlap with it. Rough guide on an A40-class GPU with the
-defaults (`local_candidates: 16`): 100 queries ≲ 20 min, full 1,534 ≲ 4 h;
-`remote` mode is network-bound and much faster. On slower GPUs, lower
-`generation.local_candidates` (8 keeps most of the accuracy — pass@k saturates
-near 8) or raise `--workers`.
+and verification overlap with it. Local decode time scales linearly with
+`generation.local_candidates` (default 6 — pass@k saturates near 8 and the
+remote arm adds diversity, so this keeps most of the accuracy at ~1/3 the GPU
+time of 16). Rough guide at the defaults: A40-class GPU ≈ 100 queries in
+10-15 min, full 1,534 ≈ 2.5-3.5 h; a 20GB workstation card ≈ 2x those times
+(drop `local_candidates` to 4 if you must hit hard time budgets on it).
+`remote` mode is network-bound and far faster. Accuracy presets: 16
+(thorough) and 64 + merge 8 (CSC paper-faithful).
 
 ## Reading results
 
@@ -138,7 +141,7 @@ record for analyzing local-vs-remote wins in ensemble mode:
 
 ```json
 {"winner_arm": "merge",        // local | remote | merge | refine
- "candidates_local": 16, "candidates_remote": 8, ...}
+ "candidates_local": 6, "candidates_remote": 8, ...}
 ```
 
 ```bash
@@ -156,9 +159,9 @@ EOF
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `ensemble` | candidate pool: local / remote / ensemble |
-| `generation.local_candidates` | 16 | SLM samples per query (64 = CSC paper preset) |
+| `generation.local_candidates` | 6 | SLM samples per query (16 thorough, 64 = CSC paper preset) |
 | `generation.remote_candidates` | 4 | remote samples per strategy (0 = off) |
-| `csc.enabled` / `csc.merge_candidates` | true / 8 | merge-revision stage |
+| `csc.enabled` / `csc.merge_candidates` | true / 4 | merge-revision stage (8 = paper preset) |
 | `retrieval.schema_mode` | `auto` | full schema ≤120 cols, linked above |
 | `selection.judge` | `auto` | tie-break on exact vote ties |
 | `refine.rounds` | 1 | execution-feedback repair on error/empty |

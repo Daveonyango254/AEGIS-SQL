@@ -71,10 +71,10 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=3,
+        default=4,
         help="Concurrent query workers. GPU decode is serialized internally, so "
         "workers overlap remote API calls + SQLite voting + verification with "
-        "GPU work (default: 3; 1 = serial)",
+        "GPU work (default: 4; 1 = serial)",
     )
 
     args = parser.parse_args()

@@ -40,7 +40,7 @@ def run_prediction_generation(
     output_name: str,
     config_path: str,
     bird_path: str,
-    workers: int = 3,
+    workers: int = 4,
 ) -> Path:
     """Run prediction generation step.
 
@@ -527,8 +527,8 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=3,
-        help="Concurrent query workers for prediction generation (default: 3)",
+        default=4,
+        help="Concurrent query workers for prediction generation (default: 4)",
     )
 
     args = parser.parse_args()

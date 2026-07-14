@@ -42,16 +42,16 @@ retrieval:
   rerank: false                # linked mode: ColBERT re-rank
 
 generation:
-  local_candidates: 16         # GRPO samples per query (64 = CSC-SQL paper-faithful)
+  local_candidates: 6          # decode time scales with this; 16/64 = accuracy presets
   remote_candidates: 4         # remote samples per strategy (0 disables the remote arm)
   remote_strategies: [direct, query_plan]
   temperature: 0.8             # CSC-SQL sampling temperature
   max_tokens: 1024
-  local_chunk_size: 4          # HF backend: samples per generate() call (halves on OOM)
+  local_chunk_size: 8          # samples per generate() batch (auto-halves on OOM)
 
 csc:
   enabled: true                # merge-revision on the top-2 disagreeing vote groups
-  merge_candidates: 8          # merge model samples (CSC-SQL: 8)
+  merge_candidates: 4          # merge samples (8 = CSC paper preset)
 
 selection:
   judge: auto                  # off | local | remote | auto (tie-breaks split votes)

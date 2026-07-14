@@ -303,7 +303,7 @@ class GenerationConfig(BaseModel):
     temperature: float = Field(default=0.8, description="Sampling temperature (CSC-SQL setting)")
     max_tokens: int = Field(default=1024, description="Decode budget (reasoning + SQL)")
     local_chunk_size: int = Field(
-        default=4,
+        default=8,
         description="HF backend: sequences sampled per generate() call. n candidates are "
         "drawn in n/chunk batches — bounds KV-cache memory; halved automatically on CUDA "
         "OOM. Statistically identical to one big batch (independent samples either way).",
@@ -314,7 +314,11 @@ class CscConfig(BaseModel):
     """Corrective self-consistency (the merge-revision stage)."""
 
     enabled: bool = Field(default=True, description="Run merge-revision on top-2 disagreeing vote groups")
-    merge_candidates: int = Field(default=8, description="Merge model samples (CSC-SQL: 8)")
+    merge_candidates: int = Field(
+        default=4,
+        description="Merge model samples (CSC-SQL uses 8; 4 halves the merge-stage "
+        "decode and the re-vote between two drafts remains stable)",
+    )
 
 
 class SelectionConfig(BaseModel):
