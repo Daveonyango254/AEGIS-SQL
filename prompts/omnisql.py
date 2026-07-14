@@ -74,8 +74,16 @@ _GEN_TASK_LINE = (
 )
 
 
-def _quote_ident(name: str) -> str:
-    """Backtick-quote identifiers that need it (spaces/parens/hyphens)."""
+def _quote_ident(name) -> str:
+    """Backtick-quote identifiers that need it (spaces/parens/hyphens).
+
+    None-safe: some BIRD databases (european_football_2, debit_card_specializing)
+    yield PRAGMA foreign/primary keys whose column is None; a bare re.search(None)
+    used to crash the whole query before any candidate was generated.
+    """
+    if name is None:
+        return ""
+    name = str(name)
     if re.search(r"[^\w]", name):
         return f"`{name}`"
     return name
@@ -117,15 +125,16 @@ def build_db_details(
                 vals = ", ".join(str(v) for v in col.example_values[:max_examples])
                 comment_bits.append(f"example: [{vals}]")
             lines.append(f"    {_quote_ident(cname)} {ctype}, -- {' | '.join(comment_bits)}")
-        # PRIMARY KEY clause
-        table_pks = [c for c in pks.get(table, []) if any(
+        # PRIMARY KEY clause (skip None-valued key columns from bad PRAGMA).
+        table_pks = [c for c in pks.get(table, []) if c and any(
             col.name.split(".", 1)[1] == c for col in cols)]
         if table_pks:
             lines.append(f"    PRIMARY KEY ({', '.join(_quote_ident(c) for c in table_pks)}),")
-        # FOREIGN KEY clauses (only when both endpoints are rendered)
+        # FOREIGN KEY clauses (only when both endpoints are rendered + non-None).
         rendered = set(by_table.keys())
         for fk in fks:
-            if fk.from_table == table and fk.to_table in rendered:
+            if (fk.from_table == table and fk.to_table in rendered
+                    and fk.from_column and fk.to_column):
                 lines.append(
                     f"    FOREIGN KEY ({_quote_ident(fk.from_column)}) REFERENCES "
                     f"{_quote_ident(fk.to_table)}({_quote_ident(fk.to_column)}),"
