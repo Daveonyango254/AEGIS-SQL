@@ -91,6 +91,80 @@ def execute_preview(db_path: str, sql: str, timeout: float = 15.0,
                 pass
 
 
+# --- shared tournament logic (backend-agnostic) --------------------------------
+
+def parse_ab(text: str, default: str = "A") -> str:
+    """Extract the model's A/B choice; default on none.
+
+    Prefers a STANDALONE letter (word boundary) so words like "answer" don't
+    register as an 'A'; takes the last such token since models often restate the
+    options before committing. Falls back to any A/B, then the default.
+    """
+    if not text:
+        return default
+    upper = text.upper()
+    standalone = re.findall(r"\b[AB]\b", upper)
+    if standalone:
+        return standalone[-1]
+    m = re.search(r"[AB]", upper)
+    return m.group(0) if m else default
+
+
+def run_tournament(pool: List[str], previews: Dict[str, str], compare) -> Tuple[str, Dict[str, int]]:
+    """Round-robin, both-orderings tournament. ``compare(a,pa,b,pb) -> 'A'|'B'``.
+
+    Returns (winner_sql, wins). Tie-break favors the earliest candidate (the
+    execution-vote / greedy default the caller places first).
+    """
+    wins = {c: 0 for c in pool}
+    for i in range(len(pool)):
+        for j in range(i + 1, len(pool)):
+            a, b = pool[i], pool[j]
+            wins[a if compare(a, previews[a], b, previews[b]) == "A" else b] += 1
+            wins[b if compare(b, previews[b], a, previews[a]) == "A" else a] += 1
+    best = max(range(len(pool)), key=lambda k: (wins[pool[k]], -k))
+    return pool[best], wins
+
+
+def tournament_select(candidates: List[str], *, question: str, evidence: str,
+                      schema_block: str, db_path: str, compare,
+                      max_candidates: int = 4, exec_timeout: float = 15.0) -> Optional[str]:
+    """Execute previews + run the tournament over the top candidates.
+
+    ``compare`` is the A/B backend (trained model logits OR an existing model's
+    text reply). Returns the winner, or None when it cannot run (no db / <2).
+    """
+    pool = [c for c in candidates if c and c.strip()][:max_candidates]
+    if len(pool) < 2:
+        return pool[0] if pool else None
+    if not db_path or db_path == ":memory:":
+        return None
+    previews = {c: execute_preview(db_path, c, exec_timeout) for c in pool}
+    winner, wins = run_tournament(pool, previews, compare)
+    logger.info(f"tournament_select: winner has {wins[winner]}/{2*(len(pool)-1)} wins")
+    return winner
+
+
+def judge_fn_compare(judge_fn, question: str, evidence: str, schema_block: str):
+    """Adapt an existing model's text-generation callable into an A/B comparator.
+
+    ``judge_fn(prompt, n, temperature, system_prompt) -> List[str]`` — the same
+    trusted-model callable the heuristic judge uses (SLM on the local path, LLM on
+    the remote path). This is the *no-training* selector: reuse the model already
+    loaded, but decide via pairwise A/B instead of the listwise heuristic.
+    """
+    def compare(sql_a, prev_a, sql_b, prev_b):
+        prompt = build_selector_prompt(question, evidence, schema_block,
+                                       sql_a, prev_a, sql_b, prev_b)
+        try:
+            out = judge_fn(prompt, 1, 0.0, SELECTOR_SYSTEM)
+            return parse_ab(out[0] if out else "")
+        except Exception as e:
+            logger.debug(f"judge_fn_compare failed ({e}); defaulting to A")
+            return "A"
+    return compare
+
+
 # --- lazy model cache (one instance per model id per process) ------------------
 
 _MODEL_CACHE: Dict[str, Tuple[object, object]] = {}
@@ -175,25 +249,13 @@ class PairwiseSelector:
         if not self._ensure():
             return None
 
-        previews = {c: execute_preview(db_path, c, self.exec_timeout) for c in pool}
-        wins = {c: 0 for c in pool}
-        for i in range(len(pool)):
-            for j in range(i + 1, len(pool)):
-                a, b = pool[i], pool[j]
-                # Compare both orderings to cancel position bias.
-                if self._compare(question, evidence, schema_block, a, previews[a], b, previews[b]) == "A":
-                    wins[a] += 1
-                else:
-                    wins[b] += 1
-                if self._compare(question, evidence, schema_block, b, previews[b], a, previews[a]) == "A":
-                    wins[b] += 1
-                else:
-                    wins[a] += 1
-
-        # Winner = most wins; tie-break toward the earliest (execution-vote) candidate.
-        best = max(range(len(pool)), key=lambda k: (wins[pool[k]], -k))
-        logger.info(f"PairwiseSelector: picked candidate {best} (wins={wins[pool[best]]})")
-        return pool[best]
+        compare = lambda a, pa, b, pb: self._compare(  # noqa: E731
+            question, evidence, schema_block, a, pa, b, pb)
+        return tournament_select(
+            pool, question=question, evidence=evidence, schema_block=schema_block,
+            db_path=db_path, compare=compare, max_candidates=self.max_candidates,
+            exec_timeout=self.exec_timeout,
+        )
 
     def _compare(self, question, evidence, schema_block, sql_a, prev_a, sql_b, prev_b) -> str:
         """One A/B comparison; returns 'A' or 'B' (defaults to 'A' on any failure)."""

@@ -337,12 +337,20 @@ and runs a round-robin **both-orderings** tournament (position-bias-cancelled) u
 exact `A`/`B` prompt; the winner replaces the heuristic judge. It is gated by one config key and
 lives entirely inside `agents/`, so it is removed with the booster if the verdict is negative.
 
-To run:
-1. Train + publish the selector — run `aegis-selector/selector_finetune.ipynb` (publishes
-   `Daveonyango254/aegis-sql-selector-3b`). *This must exist first; the Hub repo is currently absent.*
-2. Set `agents.selector_model: Daveonyango254/aegis-sql-selector-3b` in `config.yaml`.
-3. Re-run the 2×2 (both orchestrators × local/remote, 100q seed 42) and compare `multi_agent` EX
-   against the `graph` baselines above.
+Two ways to run it — pick by how much time you have:
+
+- **Fast, no training** — `agents.selector_model: pairwise`. Runs the same round-robin tournament
+  but powered by the **model already loaded** (the 7B SLM on the local arm, gpt-4o on the remote
+  arm) instead of a trained model. This isolates the *selection mechanism* (pairwise A/B over the
+  top candidates, always, both orderings) from the *current* heuristic (listwise, split-vote-only) —
+  no download, no training, one config flag. Best first probe of the booster's fate.
+- **Full lever** — train + publish the 3B selector (`aegis-selector/selector_finetune.ipynb` →
+  `Daveonyango254/aegis-sql-selector-3b`), then `agents.selector_model: Daveonyango254/aegis-sql-selector-3b`.
+  Only worth the training time if the fast probe is promising or inconclusive.
+
+Then re-run the 2×2 (both orchestrators × local/remote, 100q seed 42) and compare `multi_agent` EX
+against the `graph` baselines above. On the remote arm the pairwise judge is gpt-4o itself — a
+strong reasoner adjudicating its own candidates, which is where a selection lift is most likely.
 
 **Decision rule.** If `multi_agent` + trained selector clears the `graph` baseline by more than
 noise (>~3 pts) on the remote arm, the booster is justified — keep it. If not, the booster is

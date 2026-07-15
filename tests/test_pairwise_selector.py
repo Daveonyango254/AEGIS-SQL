@@ -44,6 +44,7 @@ sys.modules["workflow.model_cache"] = _mc
 
 from agents.pairwise_selector import (  # noqa: E402
     SELECTOR_SYSTEM, PairwiseSelector, build_selector_prompt, execute_preview,
+    judge_fn_compare, parse_ab, tournament_select,
 )
 
 
@@ -127,6 +128,36 @@ def test_single_candidate_short_circuits():
     assert sel.select(["only"], question="q", evidence="", schema_block="s", db_path=":memory:") == "only"
     # in-memory / no db path -> cannot execute previews -> None (caller keeps vote)
     assert sel.select(["a", "b"], question="q", evidence="", schema_block="s", db_path=":memory:") is None
+
+
+def test_parse_ab():
+    assert parse_ab("A") == "A" and parse_ab("B") == "B"
+    assert parse_ab("The answer is b.") == "B"
+    assert parse_ab("") == "A" and parse_ab("neither") == "A"  # default
+
+
+def test_reuse_tournament_via_text_judge():
+    """The no-training path: a text judge_fn drives the same tournament."""
+    db = _db()
+    try:
+        cands = ["SELECT x FROM t WHERE x=1", "SELECT x FROM t WHERE x=2",
+                 "SELECT x FROM t WHERE x=3"]
+        winner = cands[1]
+
+        # Fake judge_fn(prompt, n, temperature, system_prompt) -> [reply]; replies
+        # "A" when the winner is Candidate A in the prompt, else "B".
+        def judge_fn(prompt, n, temperature, system_prompt):
+            a_block = prompt.split("Candidate A:")[1].split("Execution result")[0]
+            return ["A" if winner.strip() in a_block else "B"]
+
+        compare = judge_fn_compare(judge_fn, "q", "", "CREATE TABLE t (x INTEGER)")
+        picked = tournament_select(
+            cands, question="q", evidence="", schema_block="CREATE TABLE t (x INTEGER)",
+            db_path=db, compare=compare, max_candidates=4,
+        )
+        assert picked == winner
+    finally:
+        os.unlink(db)
 
 
 if __name__ == "__main__":

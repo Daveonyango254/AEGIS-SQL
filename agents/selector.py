@@ -28,18 +28,26 @@ class SelectorAgent:
         self.timeout = agents.selection_timeout
         self.max_judge_candidates = agents.max_judge_candidates
 
-        # Optional trained pairwise selector (CHASE-SQL lever). Constructed here
-        # but the model loads lazily on first use, so this stays import-safe and
-        # zero-cost when unconfigured. Empty selector_model => heuristic judge only.
-        self.pairwise = None
-        model_id = (getattr(agents, "selector_model", "") or "").strip()
-        if model_id:
+        # Selection mechanism (config `agents.selector_model`):
+        #   ""                 -> heuristic listwise judge on split votes (default)
+        #   "pairwise"|"reuse" -> pairwise round-robin tournament using the model
+        #                         ALREADY loaded (SLM local / LLM remote) via judge_fn
+        #                         — the no-training CHASE-style selector
+        #   "<org>/<repo>"     -> trained HF pairwise selector (aegis-selector)
+        # The trained model loads lazily; construction stays import-safe/zero-cost.
+        self.pairwise = None            # trained HF selector (or None)
+        self.reuse_pairwise = False     # tournament over the existing model
+        sel = (getattr(agents, "selector_model", "") or "").strip()
+        if sel in ("pairwise", "reuse"):
+            self.reuse_pairwise = True
+            logger.info("SelectorAgent: pairwise tournament over the loaded model (no training)")
+        elif "/" in sel:
             try:
                 from agents.pairwise_selector import PairwiseSelector
 
                 mcfg = config.slm
                 self.pairwise = PairwiseSelector(
-                    model_id,
+                    sel,
                     cache_dir=getattr(mcfg, "cache_dir", None),
                     hf_token=self._resolve_token(getattr(mcfg, "hf_token", None)),
                     device=getattr(mcfg, "device", "auto"),
@@ -47,10 +55,15 @@ class SelectorAgent:
                     max_candidates=self.max_judge_candidates,
                     exec_timeout=self.timeout,
                 )
-                logger.info(f"SelectorAgent: trained pairwise selector enabled ({model_id})")
+                logger.info(f"SelectorAgent: trained pairwise selector enabled ({sel})")
             except Exception as e:  # never let selector wiring break selection
                 logger.warning(f"SelectorAgent: pairwise selector unavailable ({e})")
                 self.pairwise = None
+
+    @property
+    def needs_judge_fn(self) -> bool:
+        """Whether the orchestrator must build a judge callable for this selector."""
+        return self.judge_enabled or self.reuse_pairwise
 
     @staticmethod
     def _resolve_token(token):
@@ -80,26 +93,37 @@ class SelectorAgent:
         info = select_best(candidates, ctx.db_path, timeout=self.timeout)
         best = info.get("best_sql", candidates[0])
 
-        # Trained pairwise selector (if configured) arbitrates among the top
-        # candidates, replacing the heuristic judge. The execution-vote winner is
-        # placed first so it wins ties. This is the CHASE-SQL selection lever.
-        if self.pairwise is not None:
+        # Pairwise tournament (trained model OR the loaded model) arbitrates among
+        # the top candidates, replacing the heuristic judge. The execution-vote
+        # winner is placed first so it wins ties. This is the CHASE-SQL lever.
+        if self.pairwise is not None or (self.reuse_pairwise and judge_fn):
             try:
                 ordered = [best] + [c for c in candidates if c != best]
                 schema_block, _, _ = render_schema_ddl(
                     ctx.schema_elements, schema=ctx.schema, expose_keys=ctx.expose_keys
                 )
-                picked = self.pairwise.select(
-                    ordered,
-                    question=ctx.query.text,
-                    evidence=getattr(ctx.query, "evidence", "") or "",
-                    schema_block=schema_block,
-                    db_path=ctx.db_path,
-                )
+                question = ctx.query.text
+                evidence = getattr(ctx.query, "evidence", "") or ""
+                if self.pairwise is not None:
+                    picked = self.pairwise.select(
+                        ordered, question=question, evidence=evidence,
+                        schema_block=schema_block, db_path=ctx.db_path,
+                    )
+                    tag = "trained_pairwise"
+                else:
+                    from agents.pairwise_selector import judge_fn_compare, tournament_select
+
+                    compare = judge_fn_compare(judge_fn, question, evidence, schema_block)
+                    picked = tournament_select(
+                        ordered, question=question, evidence=evidence,
+                        schema_block=schema_block, db_path=ctx.db_path, compare=compare,
+                        max_candidates=self.max_judge_candidates, exec_timeout=self.timeout,
+                    )
+                    tag = "reuse_pairwise"
                 if picked:
                     if picked != best:
-                        logger.info("Selector: trained pairwise selector overrode execution vote")
-                    return picked, {**info, "selector": "trained_pairwise"}
+                        logger.info(f"Selector: {tag} overrode execution vote")
+                    return picked, {**info, "selector": tag}
             except Exception as e:  # fall through to heuristic on any failure
                 logger.warning(f"Selector: pairwise selection failed ({e}); using execution vote")
 

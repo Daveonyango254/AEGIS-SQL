@@ -321,9 +321,11 @@ class AgentsConfig(BaseModel):
     )
     selector_model: str = Field(
         default="",
-        description="HF repo id of a trained pairwise selection model (CHASE-SQL lever, "
-        "e.g. 'Daveonyango254/aegis-sql-selector-3b'). When set, a round-robin tournament "
-        "with this model replaces the heuristic judge. Empty = disabled (heuristic judge).",
+        description="Selection mechanism. '' = heuristic listwise judge (default). "
+        "'pairwise' = round-robin A/B tournament using the already-loaded model "
+        "(SLM on the local path, LLM on the remote path) — the no-training CHASE-SQL "
+        "lever. '<org>/<repo>' = a trained pairwise selector model (aegis-selector). "
+        "The pairwise modes replace the heuristic judge among the top candidates.",
     )
     max_judge_candidates: int = Field(
         default=4, description="Cap on candidates shown to the selection judge"

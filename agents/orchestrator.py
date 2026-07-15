@@ -75,7 +75,8 @@ class MultiAgentOrchestrator:
             candidates = [self._fallback_candidate(ctx, query, schema_elements, schema, llm, abstracted_prompt)]
 
         judge_fn = (
-            self._judge_fn(cache, remote_llm=llm) if self.selector.judge_enabled else None
+            self._judge_fn(cache, remote_llm=llm)
+            if self.selector.needs_judge_fn else None
         )
         best_text, _ = self.selector.select(candidates, ctx, judge_fn=judge_fn)
         best_text = self.refiner.refine(best_text, ctx)
