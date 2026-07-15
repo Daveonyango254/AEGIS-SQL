@@ -319,6 +319,12 @@ class AgentsConfig(BaseModel):
         description="Judge model: 'local' (trusted SLM, zero leakage), 'remote', or "
         "'auto' (remote only when DP abstraction is disabled)",
     )
+    selector_model: str = Field(
+        default="",
+        description="HF repo id of a trained pairwise selection model (CHASE-SQL lever, "
+        "e.g. 'Daveonyango254/aegis-sql-selector-3b'). When set, a round-robin tournament "
+        "with this model replaces the heuristic judge. Empty = disabled (heuristic judge).",
+    )
     max_judge_candidates: int = Field(
         default=4, description="Cap on candidates shown to the selection judge"
     )

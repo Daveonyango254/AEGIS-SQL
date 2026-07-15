@@ -140,6 +140,7 @@ agents:
   refine_rounds: 1                   # bounded execution-feedback repair on the winner (0 disables)
   judge_enabled: true                # tie-break split execution votes (CHASE-SQL selector)
   judge_model: auto                  # local | remote | auto (remote only when abstraction is off)
+  selector_model: ""                 # HF id of trained pairwise selector (e.g. Daveonyango254/aegis-sql-selector-3b); replaces the heuristic judge. "" = disabled. THE booster-fate experiment: set this, re-run the 2x2.
   max_judge_candidates: 4            # cap candidates shown to the judge
   selection_timeout: 30              # per-candidate execution timeout (s) during select/refine
 

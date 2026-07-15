@@ -328,10 +328,26 @@ Two clean findings:
    disagree by ~1 pt on the graph runs — evaluator quirk, not the pipeline.)
 
 **Implication.** The booster's promise (candidates + selection > single-shot) is currently
-*unrealized* because the selector is heuristic. The highest-value experiment is to wire the trained
-pairwise selector (`aegis-selector`, CHASE-SQL: +4.17 EX) into `SelectorAgent`'s judge and re-run
-the 2×2 — if the booster then overtakes graph, the thesis holds; if not, the honest paper result is
-that single-shot + recall-first retrieval + verification (the graph) is the strong baseline.
+*unrealized* because the selector is heuristic. The decisive experiment is to swap in the trained
+pairwise selector (`aegis-selector`, CHASE-SQL: +4.17 EX) and re-run the 2×2.
+
+**Booster-fate experiment (wired, ready to run).** `agents/pairwise_selector.py` implements the
+trained selector: it loads the fine-tuned model, executes each top candidate for a result preview,
+and runs a round-robin **both-orderings** tournament (position-bias-cancelled) using the notebook's
+exact `A`/`B` prompt; the winner replaces the heuristic judge. It is gated by one config key and
+lives entirely inside `agents/`, so it is removed with the booster if the verdict is negative.
+
+To run:
+1. Train + publish the selector — run `aegis-selector/selector_finetune.ipynb` (publishes
+   `Daveonyango254/aegis-sql-selector-3b`). *This must exist first; the Hub repo is currently absent.*
+2. Set `agents.selector_model: Daveonyango254/aegis-sql-selector-3b` in `config.yaml`.
+3. Re-run the 2×2 (both orchestrators × local/remote, 100q seed 42) and compare `multi_agent` EX
+   against the `graph` baselines above.
+
+**Decision rule.** If `multi_agent` + trained selector clears the `graph` baseline by more than
+noise (>~3 pts) on the remote arm, the booster is justified — keep it. If not, the booster is
+retired: delete `agents/` + the `orchestrator` toggle and run the `graph` pipeline only (the
+simpler, equal-or-better baseline), per the streamlining plan in `CLEANUP.md`.
 
 **The decisive measurement.** The recall fix (§11) raised table recall **85% → 98%** — it works
 exactly as designed — yet EX stayed **flat (47 → 46%, a 1-query swing = noise)**. Spot-checking the
