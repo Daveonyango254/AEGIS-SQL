@@ -302,6 +302,23 @@ took 25.3 min (~15 s/query; 13 queries > 15 s). **Table recall: 85/100** (§11).
 | **Local SLM + RAG v2 + recall fix** | 100q | **46.00%** | **98%** |
 | Local SLM single-shot (pre-booster) | 100q | ~42–45% | — |
 
+**Orchestrator A/B (same local config, healthy GPU, seed 42, 100q).** Toggling only
+`orchestrator`:
+
+| Orchestrator | EX | Simple | Moderate | Challenging | Recall |
+|---|---|---|---|---|---|
+| `graph` (legacy LangGraph) | **48–49%** | 50.0 | 40.0 | 60.0 | 99% |
+| `multi_agent` (booster) | 46% | 46.7 | 43.3 | 50.0 | 98% |
+
+The two are **statistically indistinguishable** (a 2–3 query gap on 100 samples, inside the ±9
+noise band) — the graph is marginally ahead here, so **the booster does not beat the simpler
+pipeline on the local path.** This is expected: the booster's diversity + judge machinery pays off
+with a *general* reasoner (the remote gpt-4o ensemble reached 61.93%), whereas a SQL-*specialist*
+7B gains little from extra candidates over single-generation + repair. It is one more data point
+that the local ceiling (~46–49%) is **model-bound, not harness-bound**. (Minor: the inline
+`MetricsCalculator` reports 0.49 for the graph run and the standalone `evaluator_ex` 0.48 — a small
+evaluator discrepancy, both ≈ 48%.)
+
 **The decisive measurement.** The recall fix (§11) raised table recall **85% → 98%** — it works
 exactly as designed — yet EX stayed **flat (47 → 46%, a 1-query swing = noise)**. Spot-checking the
 recovered queries confirms why: they now retrieve *all* their tables (often the full DB schema),
