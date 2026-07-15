@@ -69,10 +69,6 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
     workflow = StateGraph(AEGISState)
 
     # Define nodes
-    # Conditional: Add ambiguity resolution node if enabled
-    if config.ambiguity.enabled:
-        workflow.add_node("ambiguity_resolution", ambiguity_resolution_node)
-
     workflow.add_node("schema_extraction", schema_extraction_node)
     workflow.add_node("routing", routing_node)
     workflow.add_node("abstraction", abstraction_node)
@@ -82,14 +78,7 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
     workflow.add_node("verification", verification_node)
 
     # Define edges
-    if config.ambiguity.enabled:
-        # Ambiguity resolution first, then schema extraction
-        workflow.set_entry_point("ambiguity_resolution")
-        workflow.add_edge("ambiguity_resolution", "schema_extraction")
-    else:
-        # Standard entry point
-        workflow.set_entry_point("schema_extraction")
-
+    workflow.set_entry_point("schema_extraction")
     workflow.add_edge("schema_extraction", "routing")
 
     # Conditional routing after router decision
@@ -138,106 +127,6 @@ def build_aegis_graph(config: AEGISConfig) -> StateGraph:
 # ============================================================================
 # Node Implementations
 # ============================================================================
-
-
-def ambiguity_resolution_node(state: AEGISState) -> AEGISState:
-    """Query Planner Agent - Step 0: Ambiguity Detection & Resolution (optional).
-
-    Detects and resolves ambiguous natural language queries before SQL generation.
-    Only runs if ambiguity.enabled=true in config.
-
-    Args:
-        state: Current workflow state
-
-    Returns:
-        Updated state with potentially rewritten query
-    """
-    logger.info("Running Query Planner Agent - Step 0: Ambiguity Resolution...")
-
-    # Get ambiguity resolver from cache
-    from workflow.model_cache import get_cache
-    cache = get_cache()
-
-    # Lazy-load resolver on first use
-    if not hasattr(cache, '_ambiguity_resolver') or cache._ambiguity_resolver is None:
-        from query_planner.ambiguity_resolver import AmbiguityResolver
-        from config import AEGISConfig
-
-        # Load config to get ambiguity settings
-        config = AEGISConfig.from_yaml("config.yaml")
-        amb_config = config.ambiguity
-
-        # Get SLM generator if LLM mode is enabled (for privacy-preserving ambiguity detection)
-        slm_generator = None
-        if amb_config.detector_type == "llm":
-            slm_generator = cache.get_slm_generator()
-
-        cache._ambiguity_resolver = AmbiguityResolver(
-            detector_type=amb_config.detector_type,
-            resolution_mode=amb_config.resolution_mode,
-            auto_resolve_temporal=amb_config.auto_resolve_temporal,
-            temporal_default_days=amb_config.temporal_default_days,
-            confidence_threshold=amb_config.confidence_threshold,
-            slm_generator=slm_generator
-        )
-
-    resolver = cache._ambiguity_resolver
-
-    # Detect ambiguities
-    query = state["query"]
-    schema = state.get("schema")
-
-    ambiguities = resolver.detect(query, schema)
-
-    # Store original query before any modifications
-    state["original_query"] = query
-    state["is_ambiguous"] = len(ambiguities) > 0
-    state["detected_ambiguities"] = [
-        {
-            "type": amb.type,
-            "phrase": amb.phrase,
-            "reason": amb.reason,
-            "candidates": amb.candidates,
-            "confidence": amb.confidence
-        }
-        for amb in ambiguities
-    ]
-
-    if len(ambiguities) == 0:
-        logger.info("AMBIGUITY_CHECK: No ambiguities detected")
-        return state
-
-    logger.info(f"AMBIGUITY_DETECTED: Found {len(ambiguities)} ambiguities")
-    for amb in ambiguities:
-        logger.debug(f"  - {amb.type}: '{amb.phrase}' → {amb.candidates}")
-
-    # Resolve ambiguities
-    try:
-        rewritten_query, resolutions = resolver.resolve(query, ambiguities, schema)
-
-        # Update query with resolved version
-        state["query"].text = rewritten_query
-        state["ambiguity_resolutions"] = [
-            {
-                "type": res.ambiguity.type,
-                "phrase": res.ambiguity.phrase,
-                "chosen": res.chosen_interpretation,
-                "rewritten": res.rewritten_phrase,
-                "method": res.method
-            }
-            for res in resolutions
-        ]
-
-        logger.info(f"AMBIGUITY_RESOLVED: {len(resolutions)} ambiguities resolved")
-        logger.info(f"QUERY_REWRITTEN: {rewritten_query}")
-
-    except Exception as e:
-        # If interactive mode raises RequiresClarificationException
-        # or any other error, store it in state
-        logger.warning(f"Ambiguity resolution failed: {e}")
-        state["clarification_questions"] = getattr(e, 'questions', None)
-
-    return state
 
 
 def schema_extraction_node(state: AEGISState) -> AEGISState:

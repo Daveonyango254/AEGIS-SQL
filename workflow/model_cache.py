@@ -60,7 +60,6 @@ class ModelCache:
         self._slm_generator: Optional[SLMGenerator] = None
         self._router: Optional[ContentIndependentRouter] = None
         self._schema_retrievers: Dict[str, SchemaRetriever] = {}
-        self._ambiguity_resolver = None  # AmbiguityResolver (lazy-loaded if enabled)
 
         # Config
         self._config: Optional[AEGISConfig] = None
@@ -430,7 +429,6 @@ class ModelCache:
         self._bgem3_model = None
         self._slm_generator = None
         self._router = None
-        self._ambiguity_resolver = None
         self._schema_retrievers.clear()
         self._retriever_access_order.clear()
         logger.info("Cache cleared")

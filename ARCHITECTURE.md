@@ -1,15 +1,31 @@
 # AEGIS-SQL — Architecture (`aegis_feat_2`)
 
-> **Scope.** This document describes the `aegis_feat_2` branch: the RAG v2 multi-step
-> retriever + the multi-agent "booster" harness. It is the chosen architecture for the
-> research paper because it delivers the strongest *validated* accuracy in the project
-> (61.93% EX on the full BIRD-dev set with a remote gpt-4o arm; ~50% local with the 7B SLM)
-> while keeping the paper's three-axis (accuracy / cost / privacy) thesis intact.
+> ## ✅ Architecture decision (final, locked)
 >
-> Sections: system overview → data flow → model components → the RAG v2 retrieval pipeline
-> → the multi-agent booster → verification & repair → the privacy layer → configuration
-> reference → evaluation harness → results → **regression analysis (why the last local run
-> was 47%)** → design rationale & trade-offs → repository layout.
+> **The `graph` pipeline (LangGraph: schema-link → route → [local SLM | remote abstract→LLM→
+> reconstruct] → verify → bounded repair) is the system architecture.** The `multi_agent`
+> "booster" harness has been **removed** after a full A/B: it never beat the simpler graph on
+> any tested configuration (local SLM 46–49% vs graph 49%; remote gpt-4o 53% vs graph 55%),
+> even after adding a pairwise-tournament selector, while costing ~40% more wall-time. The
+> ambiguity resolver (`query_planner/`) was also removed (unused). The DP-abstraction / router
+> **privacy** code is **kept** — it is the paper's three-axis thesis and the graph's remote path
+> uses it.
+>
+> **Removed:** `agents/` (booster), `query_planner/` (ambiguity), the `orchestrator`/`agents:`/
+> `ambiguity:` config, and the eval-driver toggle (now graph-only).
+> **Final numbers (100q, seed 42, RAG v2 recall-fix):** graph local **49%**, graph remote
+> **55%**. Retrieval recall is 98%; the ceiling is the generator, not the harness (§10–11).
+>
+> Sections 5 and the booster parts of §2 below are retained as the **experimental record** that
+> led to this decision — they describe code no longer in the tree.
+
+---
+
+> **Historical scope note (pre-decision).** The sections below were written while the
+> multi-agent booster was still a candidate. They remain accurate about the RAG v2 retriever,
+> the privacy layer, verification, config, and the results/regression analysis — all still in
+> the shipped graph system — but references to the "booster / `agents/` / `multi_agent`
+> orchestrator / `selector_model`" describe the removed experiment, not the current code.
 
 ---
 

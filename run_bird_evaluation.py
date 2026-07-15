@@ -123,16 +123,8 @@ def main():
         # LangGraph. Both consume the same initial_state and return the same
         # result-dict contract, so everything downstream is unchanged.
         logger.info("\n[3/5] Building AEGIS-SQL workflow...")
-        use_agents = getattr(config, "orchestrator", "graph") == "multi_agent"
-        if use_agents:
-            from agents import MultiAgentOrchestrator
-            orchestrator = MultiAgentOrchestrator(config)
-            graph = None
-            logger.info("✓ Multi-agent booster orchestrator ready")
-        else:
-            orchestrator = None
-            graph = build_aegis_graph(config)
-            logger.info("✓ Workflow graph compiled")
+        graph = build_aegis_graph(config)
+        logger.info("✓ Workflow graph compiled")
 
         # Warmup model cache (pre-load models and embeddings)
         logger.info("\n[4/5] Warming up model cache...")
@@ -195,10 +187,7 @@ def main():
                 # hard backstop: the repair loop is already bounded by
                 # verifier.max_repair_attempts, but this guarantees a pathological
                 # state raises instead of hanging the run (caught by the except).
-                if use_agents:
-                    result = orchestrator.run(initial_state)
-                else:
-                    result = graph.invoke(initial_state, config={"recursion_limit": 12})
+                result = graph.invoke(initial_state, config={"recursion_limit": 12})
 
                 # Extract results
                 sql = result.get("sql")
