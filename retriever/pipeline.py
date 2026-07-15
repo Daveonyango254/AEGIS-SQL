@@ -116,10 +116,16 @@ class MultiStepRetriever:
                 scores, question_tokens, hit_columns,
                 dq.wants_aggregate, bool(dq.numbers), numeric_columns,
             )
+            # Tables the question names by word (with light singular/plural
+            # folding) are evidence-backed and must survive the table cap — this
+            # is the recall guarantee for endpoint tables like financial's
+            # `client` that score below the budget but are clearly intended.
+            protected_tables = self._name_matched_tables(question_tokens, boosted)
             chosen = adaptive_budget(
                 boosted, hit_columns, self.schema,
                 max_tables=self.rag.max_tables,
                 per_table_columns=self.rag.per_table_columns,
+                protected_tables=protected_tables,
             )
 
             # --- Step 5: coverage evaluation (drives the recursive round) ------
@@ -156,6 +162,26 @@ class MultiStepRetriever:
             f"{len(value_hits)} literals grounded, {len(dq.sub_queries)} sub-queries"
         )
         return elements
+
+    @staticmethod
+    def _name_matched_tables(question_tokens: Set[str], scores: Dict[str, float]) -> Set[str]:
+        """Tables whose name is spoken in the question (singular/plural folded).
+
+        A table the question names by word is nearly always in the gold query, so
+        it is protected from the table-budget cut. Light plural folding lets
+        "clients" match table ``client`` and "accounts" match ``account``.
+        """
+        def norm(tok: str) -> str:
+            return tok[:-1] if len(tok) > 3 and tok.endswith("s") else tok
+
+        q_norm = {norm(t) for t in question_tokens}
+        matched: Set[str] = set()
+        for name in scores:
+            table = name.split(".", 1)[0]
+            table_tokens = {norm(x) for x in table.replace("_", " ").split() if x}
+            if table_tokens & q_norm:
+                matched.add(table)
+        return matched
 
     @staticmethod
     def _uncovered(literals, value_hits, chosen) -> bool:

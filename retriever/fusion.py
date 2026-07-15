@@ -18,7 +18,7 @@ is a BFS per kept-table pair on the FK graph (both tiny for BIRD schemas).
 """
 
 from collections import defaultdict, deque
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # Reciprocal Rank Fusion constant (Cormack et al.): dampens the head so one
 # sub-query cannot dominate, while agreement across sub-queries accumulates.
@@ -127,16 +127,26 @@ def adaptive_budget(
     scores: Dict[str, float],
     value_hit_columns: Set[str],
     schema,
-    max_tables: int = 4,
+    max_tables: int = 6,
     per_table_columns: int = 10,
+    protected_tables: Optional[Set[str]] = None,
 ) -> List[str]:
     """Select the final ordered column slice under an adaptive table budget.
 
     Table selection: rank tables by total member-column score; always keep
-    tables holding a value hit; cap at ``max_tables``; then add FK bridge tables
-    so every kept pair is join-connected. Column selection per kept table: value
-    hits + primary/foreign-key columns (join keys must never be dropped) + the
-    top-scored columns up to ``per_table_columns``.
+    tables holding a value hit OR named in the question (``protected_tables``) —
+    these are evidence-backed and must never be dropped by the cap; fill the rest
+    up to ``max_tables``; then add FK bridge tables so every kept pair is
+    join-connected. Column selection per kept table: value hits +
+    primary/foreign-key columns (join keys must never be dropped) + the top-scored
+    columns up to ``per_table_columns``.
+
+    ``protected_tables`` (name-matched tables from the question) closes the recall
+    gap that dropped endpoint evidence tables — e.g. financial's ``client`` scored
+    below the top-N with no value hit, so the budget cut it and, because it was an
+    endpoint rather than a bridge intermediate, ``_bridge_tables`` could not
+    recover it. Protecting question-named tables keeps ``client`` in ``kept``,
+    which then pulls its bridge (``disp``) back via the connectivity pass.
 
     Returns column names ordered by (table evidence, column score) — the order
     the prompt renderer will use.
@@ -152,13 +162,23 @@ def adaptive_budget(
         by_table[table].append((name, score))
 
     value_tables = {c.split(".", 1)[0] for c in value_hit_columns}
+    # Evidence-backed tables bypass the cap entirely: a value hit anchors a WHERE
+    # clause, and a question-named table is almost always in the gold query. They
+    # are kept ON TOP of the top-``max_tables`` scored tables, never consuming the
+    # budget — so ``max_tables`` governs how many *additional* tables are added.
+    always_keep = value_tables | {
+        t for t in (protected_tables or set()) if t in table_score
+    }
     ranked_tables = sorted(table_score, key=lambda t: -table_score[t])
-    kept: Set[str] = set()
+    kept: Set[str] = set(always_keep)
+    filled = 0
     for t in ranked_tables:
-        if len(kept) >= max_tables and t not in value_tables:
+        if t in kept:
             continue
-        if t in value_tables or len(kept) < max_tables:
-            kept.add(t)
+        if filled >= max_tables:
+            break
+        kept.add(t)
+        filled += 1
 
     # Join connectivity: bridge tables enter with only their key columns.
     adj = _fk_adjacency(getattr(schema, "foreign_keys", None))

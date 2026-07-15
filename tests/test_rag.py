@@ -106,6 +106,41 @@ def test_budget_inserts_fk_bridge_table():
     assert "noise" not in tables                         # noise stays out
 
 
+def test_budget_protects_named_endpoint_table():
+    """A question-named endpoint table below the score cap survives + bridges.
+
+    Regression guard for the 85%-recall drop: `client` scored below `noise` with
+    no value hit, so the old budget cut it; protecting question-named tables keeps
+    it and pulls its FK bridge `disp` back in.
+    """
+    schema = _schema()
+    scores = {
+        "account.account_id": 0.9, "account.frequency": 0.8,   # top table
+        "noise.noise_id": 0.7, "noise.blob": 0.6,              # noise outranks client
+        "client.client_id": 0.05, "client.gender": 0.04,       # low-scored endpoint
+    }
+    # max_tables=1: only ONE top-scored table (account) fills the budget, so an
+    # unprotected `client` would be dropped; protection is what keeps it.
+    chosen = adaptive_budget(
+        scores, value_hit_columns=set(), schema=schema,
+        max_tables=1, per_table_columns=5, protected_tables={"client"},
+    )
+    tables = {c.split(".", 1)[0] for c in chosen}
+    assert "client" in tables       # protected despite ranking below `account`/`noise`
+    assert "account" in tables      # top-scored fills the single budget slot
+    assert "disp" in tables         # FK bridge between client & account
+    assert "noise" not in tables    # unprotected low-priority table stays out
+
+
+def test_name_matched_tables_folds_plurals():
+    """`clients` -> table `client`; exact tokens match too."""
+    from retriever.pipeline import MultiStepRetriever
+
+    scores = {"client.gender": 0.1, "account.frequency": 0.1, "noise.blob": 0.1}
+    matched = MultiStepRetriever._name_matched_tables({"clients", "account"}, scores)
+    assert matched == {"client", "account"}
+
+
 def test_budget_keeps_value_hit_tables_and_caps_columns():
     schema = _schema()
     scores = {f"client.{c}": 0.5 for c in ("client_id", "gender")}

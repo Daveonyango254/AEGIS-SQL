@@ -374,6 +374,14 @@ class SLMGenerator:
         if do_sample:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.95
+            # Optional reproducibility: seed the RNG before sampling so the
+            # temperature candidates (and thus EX) are stable run-to-run. Left
+            # unset by default to preserve the existing stochastic behavior.
+            seed = getattr(self.config, "generation_seed", None)
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
 
         with torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_kwargs)

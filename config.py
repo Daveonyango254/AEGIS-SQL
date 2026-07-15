@@ -67,6 +67,12 @@ class SLMConfig(BaseModel):
         default=0.8,
         description="Sampling temperature used for the non-greedy candidates",
     )
+    generation_seed: Optional[int] = Field(
+        default=None,
+        description="Seed torch/CUDA before sampling so the temperature candidates "
+        "(and therefore EX) are reproducible run-to-run. None = unseeded (current "
+        "behavior); set an int (e.g. 42) to remove sampling noise between runs.",
+    )
     enable_value_grounding: bool = Field(
         default=True,
         description="Inject sampled DB values / value-linking hints into the prompt",
@@ -253,7 +259,9 @@ class RagConfig(BaseModel):
         default=2, description="Retrieval rounds; round 2 relaxes matching for uncovered entities"
     )
     max_tables: int = Field(
-        default=4, description="Evidence-table budget (FK bridge tables may exceed it)"
+        default=6,
+        description="Evidence-table budget (raised 4->6 to protect FK-maze recall; "
+        "value-hit and question-named tables bypass this cap, FK bridges may exceed it)",
     )
     per_table_columns: int = Field(
         default=10, description="Column budget per kept table (keys + value hits always kept)"

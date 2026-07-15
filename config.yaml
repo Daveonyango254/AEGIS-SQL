@@ -42,6 +42,7 @@ slm:
   full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
   num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
   selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
+  generation_seed: null         # null = unseeded (stochastic); set to 42 for run-to-run reproducible sampling (removes the 47-vs-50 noise)
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
   expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
@@ -155,7 +156,7 @@ rag:
   per_query_top_k: 40       # columns per sub-query before fusion
   max_sub_queries: 6        # decomposition cap (bounds retrieval cost)
   max_rounds: 2             # round 2 relaxes matching for uncovered entities
-  max_tables: 4             # evidence-table budget (FK bridges may exceed)
+  max_tables: 6             # evidence-table budget (raised 4->6 for FK-maze recall; value-hit + question-named tables bypass the cap, FK bridges may exceed)
   per_table_columns: 10     # per-table column budget (keys + value hits always kept)
   value_retrieval: true     # locate question literals in the DB (exact stored forms)
   max_value_probes: 200     # LIKE-probe budget per query
