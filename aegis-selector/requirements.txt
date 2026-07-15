@@ -1,0 +1,16 @@
+# Core training stack (version floors, not hard pins, so security fixes flow).
+torch>=2.1
+transformers>=4.44
+peft>=0.11
+trl>=0.9
+datasets>=2.19
+accelerate>=0.30
+huggingface_hub>=0.23
+
+# Pipeline utilities
+func_timeout>=4.3
+tqdm>=4.66
+
+# Optional: 5-10x faster candidate generation (the notebook falls back to
+# transformers sampling when vllm is absent).
+# vllm>=0.5
