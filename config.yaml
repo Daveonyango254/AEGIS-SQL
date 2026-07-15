@@ -50,7 +50,7 @@ slm:
 # ============================================================================
 llm:
   provider: openai  # openai or anthropic
-  model: gpt-4o  # gpt-4o, gpt-4-turbo, claude-3-5-sonnet-20241022, etc.
+  model: gpt-4.1-mini  # gpt-4.1-mini, gpt-4o, gpt-4-turbo, claude-3-5-sonnet-20241022, etc.
   api_key: ${OPENAI_API_KEY}  # Load from .env
   temperature: 0.0
   max_tokens: 512
@@ -60,7 +60,7 @@ llm:
 
 # ============================================================================
 # Privacy Configuration (DP Abstraction)
-# Hybrid mode (default). For the remote gpt-4o oracle run set epsilon=0 and
+# Hybrid mode (default). For the remote gpt-4.1-mini oracle run set epsilon=0 and
 # abstraction_enabled=false and reconstruction_enabled=false.
 # ============================================================================
 privacy:
@@ -80,7 +80,7 @@ privacy:
 # ============================================================================
 cost:
   budget_per_query: 0.01  # USD budget per query
-  remote_token_cost: 0.000015  # Cost per token for remote LLM (GPT-4o pricing)
+  remote_token_cost: 0.0000005  # Cost per token for remote LLM (gpt-4.1-mini blended ~$0.50/1M; was 0.000015 for gpt-4o)
   local_compute_cost: 0.0001  # Fixed cost per local SLM inference
 
 # ============================================================================

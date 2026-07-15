@@ -100,7 +100,7 @@ class LLMConfig(BaseModel):
     """Large language model configuration for remote fallback (FLLM)."""
 
     provider: str = Field(default="openai", description="LLM provider (openai/anthropic)")
-    model: str = Field(default="gpt-4o", description="LLM model name")
+    model: str = Field(default="gpt-4.1-mini", description="LLM model name")
     api_key: str = Field(default="${OPENAI_API_KEY}", description="API key from environment")
     temperature: float = Field(default=0.0, description="Sampling temperature")
     max_tokens: int = Field(default=512, description="Maximum tokens to generate")
@@ -168,7 +168,7 @@ class CostConfig(BaseModel):
 
     budget_per_query: float = Field(default=0.01, description="USD budget per query")
     remote_token_cost: float = Field(
-        default=0.000015, description="Cost per token for remote LLM"
+        default=0.0000005, description="Cost per token for remote LLM (gpt-4.1-mini blended ~$0.50/1M)"
     )
     local_compute_cost: float = Field(
         default=0.0001, description="Fixed cost per local SLM inference"
