@@ -34,11 +34,47 @@ One notebook, end to end:
 training ~1–2 h. Set `N_QUESTIONS = 100` in the config cell for a ~1-hour pilot
 first — every expensive stage checkpoints, so pilot work carries over.
 
-## Run
+## Run (interactive)
 
 ```bash
 pip install -r requirements.txt
 jupyter lab selector_finetune.ipynb   # run top to bottom
+```
+
+## Run headless on RunPod over SSH
+
+This is a multi-hour job — run it detached so an SSH drop doesn't kill it.
+
+```bash
+pip install -r requirements.txt papermill
+export HF_TOKEN=hf_xxxxxxxx          # WRITE scope; the notebook reads this (no widget needed)
+
+tmux new -s selector                 # survives disconnect (Ctrl-b d to detach)
+papermill selector_finetune.ipynb selector_out.ipynb --log-output
+# reattach later:  tmux attach -t selector
+```
+
+**Pilot first (recommended)** — a 100-question smoke run of the whole pipeline:
+
+```bash
+python - <<'PY'
+import json, re
+nb = json.load(open("selector_finetune.ipynb"))
+for c in nb["cells"]:
+    c["source"] = [re.sub(r'(n_questions\s*:\s*int\s*=\s*)\d+', r'\g<1>100', l) for l in c["source"]]
+json.dump(nb, open("selector_pilot.ipynb", "w"))
+print("wrote selector_pilot.ipynb (N_QUESTIONS=100)")
+PY
+papermill selector_pilot.ipynb pilot_out.ipynb --log-output
+```
+
+Every expensive stage checkpoints to `data/*.jsonl`, so a re-run resumes rather
+than restarting. Keep `data/` and the HF caches on the pod's **large volume**
+(e.g. `/workspace`), not the small root disk — that is the usual RunPod
+disk-quota trap. Point caches there if needed:
+
+```bash
+export HF_HOME=/workspace/.hf_cache
 ```
 
 ## Output
