@@ -294,12 +294,22 @@ took 25.3 min (~15 s/query; 13 queries > 15 s). **Table recall: 85/100** (§11).
 
 **Project history for context:**
 
-| Configuration | Scope | EX |
-|---|---|---|
-| Remote gpt-4o + RAG v2 (ensemble) | full 1,534 | **61.93%** |
-| Local SLM + RAG v2 (best) | 100q | ~50% |
-| **Local SLM + RAG v2 (this run)** | 100q | **47.00%** |
-| Local SLM single-shot (pre-booster) | 100q | ~42–45% |
+| Configuration | Scope | EX | Table recall |
+|---|---|---|---|
+| Remote gpt-4o + RAG v2 (ensemble) | full 1,534 | **61.93%** | — |
+| Local SLM + RAG v2 (best earlier) | 100q | ~50% | ~86% |
+| Local SLM + RAG v2 (baseline this investigation) | 100q | 47.00% | 85% |
+| **Local SLM + RAG v2 + recall fix** | 100q | **46.00%** | **98%** |
+| Local SLM single-shot (pre-booster) | 100q | ~42–45% | — |
+
+**The decisive measurement.** The recall fix (§11) raised table recall **85% → 98%** — it works
+exactly as designed — yet EX stayed **flat (47 → 46%, a 1-query swing = noise)**. Spot-checking the
+recovered queries confirms why: they now retrieve *all* their tables (often the full DB schema),
+but the 7B SLM still produces semantically wrong SQL — skipped joins (`account⋈disp`), wrong table
+for a column (`races.url` vs `seasons.url`), misread questions, wrong aggregation units.
+**Conclusion: schema linking is not the accuracy bottleneck on this branch — SQL generation /
+selection is.** Retrieval is now effectively solved (98% recall); the ceiling is the model's
+reasoning, which is exactly where the remote arm's 61.93% comes from.
 
 ---
 
@@ -387,11 +397,35 @@ baseline / stabiliser.
 EX — is stable run-to-run. No accuracy gain, but it removes the "is 47 vs 50 real or noise?"
 ambiguity so the recall fix can be measured cleanly.
 
-> **After pulling this branch:** re-run the 100q local eval. Recommended first pass — keep the
-> defaults (`max_tables: 6`, name protection on) and set `slm.generation_seed: 42` for a
-> reproducible number; expect table recall ~90–95% and EX back above 50%. If recall is still short
-> on FK-maze DBs, flip `rag.multi_step: false` (③) to confirm the ~99%-recall ceiling, then decide
-> whether to invest in ② for the precision/recall balance.
+> **Measured outcome (100q, seed 42, GPU healthy):** the fix raised table recall **85% → 98%**
+> (better than the projected 90–95%), but EX was **flat at 46%** — retrieval was not the
+> bottleneck. Recovered queries get their tables and still generate wrong SQL. So ① is the *correct
+> retrieval result to keep* (clean 98% recall for the paper), but the accuracy lever is elsewhere —
+> see §11e.
+
+### 11e. Where the accuracy actually lives (the real bottleneck)
+
+With recall at 98% and EX flat, the ceiling is the **local 7B SLM's SQL reasoning + candidate
+selection**, not schema linking. The evidence: given the full correct schema, the model still
+skips required joins, picks the wrong table for a projected column, and misreads question intent.
+The levers that move this number, in ROI order:
+
+1. **A trained pairwise selection model** — CHASE-SQL's ablation shows +4.17 EX over execution
+   voting, and the oracle-vs-achieved gap (82.8 vs ~73) is the largest single lever in the
+   literature. The `aegis-selector` notebook (already built, separate repo) trains exactly this;
+   wiring its Hub model into `SelectorAgent`'s judge is the highest-value next step.
+2. **A stronger / better-prompted generator** — the remote gpt-4o arm already reaches **61.93%** on
+   the same retrieval. For a local-first system, a larger or SQL-specialist-fine-tuned SLM, or more
+   diverse candidates (raise `agents.candidates_per_strategy` / add `query_plan` on the local path
+   and measure), is the lever.
+3. **Adaptive schema breadth** — because the weak model sometimes does *worse* with the full schema
+   (more tables = more ways to pick wrong), give simple/single-table queries a tight slice and
+   expand only for join-maze queries. This is refinement, not a fix — it's EX-neutral here — but it
+   removes the small simple-query noise the `max_tables: 6` bump introduced.
+
+**Bottom line:** the retrieval regression is fixed and retrieval is no longer where points are
+lost. Do not spend further effort tuning RAG for accuracy; invest in selection (①) and the
+generator (②).
 
 ---
 
