@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Read(//c/Users/david/Downloads/eval_output/output/smoke_test_exp_10/**)",
-      "mcp__Hugging_Face__hub_repo_details"
+      "mcp__Hugging_Face__hub_repo_details",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(python -m py_compile generator/slm_generator.py generator/sql_postprocess.py config.py)",
+      "Bash(python tests/test_accuracy_levers.py)",
+      "Bash(python -c \"import loguru\")",
+      "Bash(pip list *)",
+      "Bash(python tests/test_rag.py)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import loguru, pydantic, sqlglot, langgraph; print\\('deps OK'\\)\")"
     ],
     "deny": [],
     "ask": []
