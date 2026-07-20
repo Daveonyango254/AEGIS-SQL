@@ -60,8 +60,16 @@ class SLMConfig(BaseModel):
         description="Max total columns to inline as full schema before falling back to RAG retrieval",
     )
     num_candidates: int = Field(
-        default=3,
-        description="Number of candidates for execution-guided self-consistency (1 = single greedy decode)",
+        default=5,
+        description="Execution-guided self-consistency width: 1 greedy + (n-1) temperature "
+        "samples, execution-vote selected. Tunable ablation knob (1 = single greedy decode); "
+        "model-agnostic — plain HF sampling, works for any causal LM in slm.model.",
+    )
+    local_chunk_size: int = Field(
+        default=2,
+        description="Max sampled sequences decoded per model.generate call. Bounds decode "
+        "memory so higher num_candidates cannot OOM a small GPU; on CUDA OOM the chunk "
+        "auto-halves (floor 1) and retries instead of silently dropping candidates.",
     )
     selection_temperature: float = Field(
         default=0.8,

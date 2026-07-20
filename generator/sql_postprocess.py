@@ -133,6 +133,74 @@ def apply_cast_fix(sql: str) -> str:
     return sql
 
 
+# SQLite keywords that BIRD databases use as bare TABLE names (e.g. financial's
+# `order`, european_football_2's `Match`). A reserved word in table position
+# (right after FROM/JOIN/INTO/UPDATE) is a guaranteed syntax error unless quoted
+# — models reliably emit it unquoted (`FROM order WHERE order_id = ...`), which
+# crashed q158/q164 across runs. Quoting here is deterministic, idempotent, and
+# model-agnostic (fixes the class for any generator).
+_RESERVED_TABLE_WORDS = frozenset({
+    "order", "match", "set", "to", "by", "group", "index", "where", "select",
+    "from", "join", "on", "limit", "offset", "case", "when", "then", "else",
+    "end", "values", "transaction", "left", "right", "inner", "outer", "cross",
+    "union", "all", "and", "or", "not", "in", "is", "as", "exists", "between",
+    "like", "having", "distinct", "table", "primary", "foreign", "key",
+    "references", "default", "check", "using", "natural",
+})
+
+# The identifier token immediately after a table-introducing keyword. A leading
+# backtick/quote or "(" (subquery) simply does not match, so those are skipped.
+_TABLE_POSITION_RE = re.compile(
+    r"\b(FROM|JOIN|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE
+)
+
+
+def _quoted_spans(s: str) -> list[tuple[int, int]]:
+    """Spans of string literals ('...', \"...\") and backtick identifiers (`...`)."""
+    spans: list[tuple[int, int]] = []
+    in_quote = False
+    quote_char = ""
+    start = 0
+    for i, c in enumerate(s):
+        if in_quote:
+            if c == quote_char:
+                in_quote = False
+                spans.append((start, i + 1))
+        elif c in ("'", '"', "`"):
+            in_quote = True
+            quote_char = c
+            start = i
+    if in_quote:  # unterminated literal: treat the tail as quoted
+        spans.append((start, len(s)))
+    return spans
+
+
+def quote_reserved_tables(sql: str) -> str:
+    """Backtick-quote reserved-word table names in FROM/JOIN/INTO/UPDATE position.
+
+    The token after these keywords is unambiguously a table name, so quoting a
+    reserved word there can never change semantics — it only turns a guaranteed
+    SQLite syntax error into valid SQL. Matches inside string literals or
+    already-quoted identifiers are left untouched; idempotent by construction
+    (a quoted table no longer matches the identifier pattern).
+    """
+    if not sql:
+        return sql
+    spans = _quoted_spans(sql)
+
+    def _in_quoted(pos: int) -> bool:
+        return any(a <= pos < b for a, b in spans)
+
+    def _repl(m: re.Match) -> str:
+        keyword, ident = m.group(1), m.group(2)
+        if ident.lower() in _RESERVED_TABLE_WORDS and not _in_quoted(m.start(2)):
+            sep = m.group(0)[len(keyword):-len(ident)]  # preserve original spacing
+            return f"{keyword}{sep}`{ident}`"
+        return m.group(0)
+
+    return _TABLE_POSITION_RE.sub(_repl, sql)
+
+
 def finalize_sql(sql: str, enable_cast_fix: bool = True) -> str:
     """Light normalisation applied to extracted SQL before it leaves the generator."""
     if not sql:
@@ -140,6 +208,7 @@ def finalize_sql(sql: str, enable_cast_fix: bool = True) -> str:
     sql = sql.strip()
     if enable_cast_fix:
         sql = apply_cast_fix(sql)
+    sql = quote_reserved_tables(sql)
     return sql
 
 

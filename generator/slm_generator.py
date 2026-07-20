@@ -216,12 +216,12 @@ class SLMGenerator:
                     temperature=0.0, num_return_sequences=1,
                 )
             )
-            # Candidates 2..n: temperature samples (batched in one call).
+            # Candidates 2..n: temperature samples (memory-bounded chunks).
             if n > 1 and temperature > 0:
                 texts.extend(
-                    self._run_generation(
-                        inputs, max_tokens=max_tokens, do_sample=True,
-                        temperature=temperature, num_return_sequences=n - 1,
+                    self._sample_chunked(
+                        inputs, max_tokens=max_tokens,
+                        temperature=temperature, n_samples=n - 1,
                     )
                 )
 
@@ -282,9 +282,9 @@ class SLMGenerator:
                 temperature=0.0, num_return_sequences=1,
             )
             if n > 1 and temperature > 0:
-                texts.extend(self._run_generation(
-                    inputs, max_tokens=max_tokens, do_sample=True,
-                    temperature=temperature, num_return_sequences=n - 1,
+                texts.extend(self._sample_chunked(
+                    inputs, max_tokens=max_tokens,
+                    temperature=temperature, n_samples=n - 1,
                 ))
             if raw:
                 return [t.strip() for t in texts if t and t.strip()]
@@ -356,6 +356,57 @@ class SLMGenerator:
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         return inputs
 
+    def _sample_chunked(self, inputs, max_tokens: int, temperature: float,
+                        n_samples: int) -> List[str]:
+        """Decode ``n_samples`` temperature samples in memory-bounded chunks.
+
+        Decoding all samples in one ``model.generate`` batch OOMs small GPUs at
+        higher ``num_candidates`` — and an OOM here used to silently collapse the
+        whole candidate pool into a stub (the 3%-EX disaster mode). Instead:
+
+        * at most ``config.local_chunk_size`` sequences per call (identical
+          sampling params, so outputs are statistically unchanged);
+        * a DISTINCT seed per chunk (``generation_seed + produced``) so seeded
+          runs stay reproducible without chunks duplicating each other;
+        * on CUDA OOM: empty the cache, halve the chunk (floor 1) and retry —
+          LOUDLY; if even a single sequence cannot decode, return what we have
+          (the greedy candidate still competes) rather than raising into stub.
+
+        Model-agnostic: plain HF generate over whatever ``slm.model`` is loaded.
+        """
+        texts: List[str] = []
+        chunk = max(1, int(getattr(self.config, "local_chunk_size", 2)))
+        base_seed = getattr(self.config, "generation_seed", None)
+        produced = 0
+        while produced < n_samples:
+            size = min(chunk, n_samples - produced)
+            seed = (base_seed + produced) if base_seed is not None else None
+            try:
+                texts.extend(
+                    self._run_generation(
+                        inputs, max_tokens=max_tokens, do_sample=True,
+                        temperature=temperature, num_return_sequences=size,
+                        seed=seed,
+                    )
+                )
+                produced += size
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if size == 1:
+                    logger.error(
+                        "CUDA OOM decoding even a SINGLE sampled sequence — "
+                        f"returning {produced}/{n_samples} samples. Free GPU "
+                        "memory (check for stale processes with nvidia-smi) or "
+                        "lower slm.max_tokens / num_candidates."
+                    )
+                    break
+                chunk = max(1, size // 2)
+                logger.warning(
+                    f"CUDA OOM at chunk={size}; halving to {chunk} and retrying "
+                    "(candidates are preserved, not dropped)"
+                )
+        return texts
+
     def _run_generation(
         self,
         inputs,
@@ -363,8 +414,14 @@ class SLMGenerator:
         do_sample: bool,
         temperature: float,
         num_return_sequences: int = 1,
+        seed: Optional[int] = None,
     ) -> List[str]:
-        """Run model.generate and decode only the newly generated tokens."""
+        """Run model.generate and decode only the newly generated tokens.
+
+        ``seed`` (sampling only) makes the call reproducible; chunked sampling
+        passes a distinct seed per chunk so chunks don't duplicate each other.
+        Falls back to ``config.generation_seed`` when not given.
+        """
         gen_kwargs = dict(
             max_new_tokens=max_tokens,
             do_sample=do_sample,
@@ -375,9 +432,9 @@ class SLMGenerator:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.95
             # Optional reproducibility: seed the RNG before sampling so the
-            # temperature candidates (and thus EX) are stable run-to-run. Left
-            # unset by default to preserve the existing stochastic behavior.
-            seed = getattr(self.config, "generation_seed", None)
+            # temperature candidates (and thus EX) are stable run-to-run.
+            if seed is None:
+                seed = getattr(self.config, "generation_seed", None)
             if seed is not None:
                 torch.manual_seed(seed)
                 if torch.cuda.is_available():

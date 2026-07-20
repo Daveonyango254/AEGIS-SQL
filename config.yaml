@@ -36,9 +36,10 @@ slm:
   use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
   full_schema: false            # Use top_k RAG retrieval (the stable baseline); true = inline the complete schema
   full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
-  num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
+  num_candidates: 5             # Execution-guided self-consistency width (tunable ablation knob: 1 = single greedy; raised 3->5 — more executing candidates = better vote)
+  local_chunk_size: 2           # Max sampled sequences per model.generate call (memory safety; auto-halves on CUDA OOM, never silently drops candidates)
   selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
-  generation_seed: null         # null = unseeded (stochastic); set to 42 for run-to-run reproducible sampling (removes the 47-vs-50 noise)
+  generation_seed: 42           # Seed torch/CUDA before sampling: reproducible runs (was null = ±3 EX noise); set null for stochastic sampling
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
   expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
