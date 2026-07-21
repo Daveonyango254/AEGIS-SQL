@@ -136,54 +136,6 @@ class LLMFallback:
             token_usage=token_usage,
         )
 
-    def complete(
-        self,
-        prompt: str,
-        n: int = 1,
-        temperature: Optional[float] = None,
-        system_prompt: Optional[str] = None,
-        max_tokens: Optional[int] = None,
-        raw: bool = False,
-    ) -> List[str]:
-        """Model-agnostic completion from a prebuilt prompt (booster interface).
-
-        Mirrors ``SLMGenerator.complete``: one greedy decode plus ``n-1``
-        temperature samples. Samples run CONCURRENTLY (API calls are I/O bound,
-        so wall-clock is one round trip instead of n). Each call's tokens
-        accumulate in ``self.total_tokens`` for cost accounting (guarded by a
-        lock). ``raw=True`` returns the model text verbatim — used for
-        non-SQL replies such as the selection judge's candidate index, which the
-        SQL extractor would otherwise reduce to "". Returns ``[]`` on failure.
-        """
-        from concurrent.futures import ThreadPoolExecutor
-
-        max_tokens = max_tokens or self.config.max_tokens
-        sample_temp = (
-            temperature if temperature is not None else self.config.temperature
-        )
-        caller = (
-            self._call_openai if self.provider == "openai" else self._call_anthropic
-        )
-        # Temperatures: first candidate greedy (0.0), the rest sampled for diversity.
-        temps = [0.0] + [max(sample_temp, 0.5)] * (n - 1) if n > 1 else [0.0]
-
-        def one(t: float) -> Optional[str]:
-            try:
-                text, _ = caller(
-                    prompt, max_tokens, t, system_prompt=system_prompt, extract=not raw
-                )
-                return text.strip() if text and text.strip() else None
-            except Exception as e:  # one bad sample shouldn't kill the pool
-                logger.warning(f"LLM complete() sample failed: {e}")
-                return None
-
-        if len(temps) == 1:
-            results = [one(temps[0])]
-        else:
-            with ThreadPoolExecutor(max_workers=min(len(temps), 4)) as pool:
-                results = list(pool.map(one, temps))
-        return [r for r in results if r]
-
     def _call_openai(
         self, prompt: str, max_tokens: int, temperature: float,
         system_prompt: Optional[str] = None, extract: bool = True,

@@ -243,57 +243,6 @@ class SLMGenerator:
             logger.warning("Falling back to stub mode")
             return [self._generate_stub(schema_elements)]
 
-    def complete(
-        self,
-        prompt: str,
-        n: int = 1,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        system_prompt: Optional[str] = None,
-        raw: bool = False,
-    ) -> List[str]:
-        """Model-agnostic completion from a prebuilt prompt (booster interface).
-
-        Returns up to ``n`` finalized SQL strings: one greedy decode plus
-        ``n-1`` temperature samples. Used by the multi-agent generator to drive
-        arbitrary reasoning strategies through the same model plumbing as
-        ``generate_candidates``.
-
-        ``raw=True`` skips SQL extraction and returns the decoded text verbatim —
-        required for non-SQL replies such as the selection judge's candidate
-        index (a bare "2" has no SELECT, so the extractor reduced it to "" and
-        the judge silently never fired). Returns ``[]`` if the model is
-        unavailable so the caller can fall back.
-        """
-        max_tokens = max_tokens or self.config.max_tokens
-        temperature = (
-            temperature if temperature is not None
-            else getattr(self.config, "selection_temperature", 0.8)
-        )
-        if self.model is None or self.tokenizer is None:
-            logger.warning("SLM not loaded; complete() returns no candidates")
-            return []
-
-        try:
-            inputs = self._build_inputs(
-                None, None, user_content=prompt, system_prompt=system_prompt
-            )
-            texts = self._run_generation(
-                inputs, max_tokens=max_tokens, do_sample=False,
-                temperature=0.0, num_return_sequences=1,
-            )
-            if n > 1 and temperature > 0:
-                texts.extend(self._sample_chunked(
-                    inputs, max_tokens=max_tokens,
-                    temperature=temperature, n_samples=n - 1,
-                ))
-            if raw:
-                return [t.strip() for t in texts if t and t.strip()]
-            return [s for s in (self._finalize(t) for t in texts) if s]
-        except Exception as e:
-            logger.error(f"SLM complete() failed: {e}")
-            return []
-
     def _build_inputs(
         self,
         query: Query,

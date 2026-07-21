@@ -60,18 +60,6 @@ def test_unknown_strategy_raises():
         pass
 
 
-def test_judge_prompt_lists_candidates_and_asks_for_number():
-    query, cols, schema = _fixture()
-    system, user = S.build_judge_prompt(
-        query, "CREATE TABLE schools (...)", ["SELECT 1", "SELECT 2", "SELECT 3"],
-        result_previews=["(1,)", "(2,)", None],
-    )
-    assert "number" in system.lower()
-    assert "[1]" in user and "[2]" in user and "[3]" in user
-    assert "result: (1,)" in user               # execution preview shown to judge
-    assert "1-3" in user
-
-
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

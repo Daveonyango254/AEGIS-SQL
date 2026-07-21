@@ -67,8 +67,8 @@ def test_prose_select_line_loses_to_real_query():
     assert "FROM client" in got
 
 
-def test_judge_style_reply_yields_empty():
-    # Non-SQL replies (the selection judge answers "2") must not be coerced.
+def test_non_sql_reply_yields_empty():
+    # A non-SQL reply (bare number, plain sentence) must not be coerced into SQL.
     assert M.extract_sql("2") == ""
     assert M.extract_sql("The best candidate is number 3.") == ""
 
