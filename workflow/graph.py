@@ -354,6 +354,26 @@ def fslm_generation_node(state: AEGISState) -> AEGISState:
         except Exception as e:
             logger.warning(f"Candidate selection failed, using greedy: {e}")
 
+    # Deterministic post-hoc literal repair: models copy the question's spelling
+    # even when value hints show the stored form ('Brazil' vs stored 'Brasil',
+    # '2013-02-22 00:00:00' vs '2013-02-22'). Rewrite near-miss literals to their
+    # UNIQUE stored DB value; ambiguity leaves the SQL untouched.
+    if (
+        (cfg is None or getattr(cfg.slm, "enable_literal_repair", True))
+        and db_path and db_path != ":memory:" and sql and sql.text
+    ):
+        try:
+            from generator.literal_repair import repair_literals
+
+            fixed = repair_literals(sql.text, db_path)
+            if fixed != sql.text:
+                sql.text = fixed
+                # Cached execution diagnostics describe the pre-repair SQL;
+                # drop them so verification re-executes the repaired query.
+                state.pop("_candidate_exec", None)
+        except Exception as e:
+            logger.warning(f"Literal repair skipped: {e}")
+
     state["sql"] = sql
     state["generation_source"] = "slm"
 

@@ -26,9 +26,10 @@ _DEFAULT_SLM_SYSTEM_PROMPT = (
     "You are an expert text-to-SQL generator for the SQLite/BIRD benchmark. "
     "Given a database schema and a question, output a single valid SQLite query. "
     "Use the exact column names and literal values shown in the schema "
-    "(prefer values listed under 'examples:'). For ratios or averages of "
-    "integer columns, cast the numerator with CAST(... AS REAL) to avoid "
-    "integer division. Return only the SQL query."
+    "(prefer values listed under 'examples:'). SELECT exactly the columns the "
+    "question asks for — never add extra descriptive columns. For ratios or "
+    "averages of integer columns, cast the numerator with CAST(... AS REAL) to "
+    "avoid integer division. Return only the SQL query."
 )
 
 

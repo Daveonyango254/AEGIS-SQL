@@ -89,6 +89,12 @@ class SLMConfig(BaseModel):
         default=True,
         description="Wrap division numerators in CAST(... AS REAL) to fix integer-division ratio bugs",
     )
+    enable_literal_repair: bool = Field(
+        default=True,
+        description="Post-hoc literal repair: rewrite near-miss string literals in the "
+        "selected SQL (case/diacritic/datetime-suffix one-offs) to their unique stored "
+        "DB value. Deterministic and conservative (ambiguity = no change).",
+    )
     expose_keys: bool = Field(
         default=True,
         description="Expose real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt "

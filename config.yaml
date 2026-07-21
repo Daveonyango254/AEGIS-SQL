@@ -42,6 +42,7 @@ slm:
   generation_seed: 42           # Seed torch/CUDA before sampling: reproducible runs (was null = ±3 EX noise); set null for stochastic sampling
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
+  enable_literal_repair: true   # Rewrite near-miss literals in the winning SQL to their unique stored DB form ('Brazil'->'Brasil', '2013-02-22 00:00:00'->'2013-02-22'); ambiguity = no change
   expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
   retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
   max_expanded_tables: 3        # Max FK-connected tables added to the anchors
@@ -106,7 +107,7 @@ verifier:
   execution_check_llm: true  # Enable execution verification for LLM outputs
   sample_size: 100  # Number of rows for execution verification
   timeout_seconds: 30  # Execution timeout per query (raised 5->30 to stop clipping slow-but-correct SQL)
-  max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
+  max_repair_attempts: 2  # Self-correction regenerations when verification fails (raised 1->2: 13/100 queries ended with all-empty results and only one retry; 0 disables)
   repair_on_empty: true  # Treat an executed-but-empty result as a soft fail to trigger one value-aware repair
 
 # ============================================================================
