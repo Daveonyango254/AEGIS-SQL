@@ -7,7 +7,7 @@ A production-grade implementation of **AEGIS-SQL**, a hybrid natural language to
 ## Architecture Overview
 
 **Agent Names:** In the system architecture, components are referred to by their agent names:
-- **Query Planner Agent** → Encompasses `AmbiguityResolver` (query disambiguation) + `SchemaRetriever` (schema extraction) + `ContentIndependentRouter` (routing logic)
+- **Query Planner Agent** → Encompasses `SchemaRetriever` (schema extraction) + `ContentIndependentRouter` (routing logic)
 - **Reviewer Agent** → Encompasses `GrammarVerifier`, `SchemaVerifier`, `ExecutionVerifier`, `FeedbackGenerator` classes
 
 ```
@@ -20,11 +20,6 @@ Input: Natural Language Query + Database Schema
    ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │                    QUERY PLANNER AGENT                            │
-│                                                                   │
-│  Step 0: Ambiguity Resolution (Optional)                          │
-│  └─> Detect temporal/schema/underspecified ambiguities            │
-│      • Auto-resolve with defaults, OR                            │
-│      • Request user clarification                                │
 │                                                                   │
 │  Step 1: Schema Extraction                                        │
 │  └─> Retrieve relevant schema elements via multilingual          │
@@ -40,8 +35,8 @@ Input: Natural Language Query + Database Schema
            ▼ LOCAL               ▼ REMOTE              │
     ┌─────────────┐      ┌──────────────┐             │
     │   FSLM      │      │ Abstraction  │             │
-    │ (CodeLlama/ │      │ (DP ε-mech)  │             │
-    │ DeepSeek)   │      └──────┬───────┘             │
+    │ (CscSQL-7B) │      │ (DP ε-mech)  │             │
+    │             │      └──────┬───────┘             │
     └──────┬──────┘             │                     │
            │                    ▼                     │
            │             ┌──────────────┐             │
@@ -85,9 +80,19 @@ Input: Natural Language Query + Database Schema
 - **Hybrid Architecture**: Use expensive remote LLMs only when necessary
 
 ### 🎯 **High Accuracy**
-- **3-Stage Neuro-Symbolic Verification**: Grammar → Schema → Execution
-- **Multilingual Support**: English, Spanish, Korean, Chinese, Swahili
-- **State-of-the-Art Models**: CodeLlama, DeepSeek-Coder (local), GPT-4o/Claude (remote)
+- **Execution-Guided Self-Consistency**: 1 greedy + 4 sampled candidates, executed against the
+  real DB and selected by result-set majority vote (`slm.num_candidates`, chunked/OOM-safe,
+  seeded for reproducible runs)
+- **Deterministic Repairs**: post-hoc literal repair (near-miss values → exact stored DB form),
+  reserved-word table quoting, CAST-as-REAL division fix
+- **3-Stage Neuro-Symbolic Verification**: Grammar → Schema → Execution, with a bounded
+  path-aware self-correction loop
+- **RAG v2 Retrieval**: BGE-M3 hybrid dense+sparse, value grounding, FK-aware recall-first
+  budget (~99% table recall)
+- **Models**: `cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct` (local SQL specialist),
+  `gpt-4.1-mini` / Claude (remote)
+- **Multilingual**: BGE-M3 retrieval + multilingual SLM; language ablation kit included (see
+  Evaluation)
 
 ---
 
@@ -234,8 +239,6 @@ python run_full_evaluation.py --bird_path data/bird --predictions_file evaluatio
 
 ### Prediction Generation
 
-**Path A: Serial Generation (Standard)**
-
 Generate predictions without running full evaluation metrics:
 
 ```bash
@@ -249,29 +252,29 @@ python run_bird_evaluation.py --bird_path data/bird --num_queries 100 --seed 42 
 python run_bird_evaluation.py --bird_path data/bird --output_name full_bird_dev
 ```
 
-**Path B: Parallel Generation (Fast - GPU Evaluation)**
+### Language Ablation (Spanish)
 
-For faster generation of all 1534 queries (~30-90 min vs 1-2 hr), use parallel execution:
+Test how EX changes when only the **question language** changes — same seed-42 stratified
+100-query sample, same gold SQL, same databases, same pipeline. The kit builds a parallel
+data dir `data/bird_es/` where the 100 sampled questions are machine-translated to Spanish
+(named entities, quoted strings, and numbers preserved verbatim so DB value grounding is not
+confounded; the BIRD `evidence` hint stays in English to isolate the language variable):
 
 ```bash
-# Step 1: Generate predictions in parallel with checkpoint/resume
-python run_parallel_predictions.py \
-  --bird_path data/bird \
-  --out evaluation/output/full_bird_dev/predictions.jsonl \
-  --concurrency 12
+# One-time: build the Spanish mirror (needs OPENAI_API_KEY and data/bird)
+python scripts/make_spanish_sample.py
 
-# Step 2: Compute metrics from predictions
-python run_full_evaluation.py \
-  --bird_path data/bird \
-  --predictions_file evaluation/output/full_bird_dev/predictions.jsonl
+# Spanish run — identical pipeline/config/seed, only the data dir differs
+python run_full_evaluation.py --config config.yaml --seed 42 --num_queries 100 --stratify \
+       --bird_path data/bird_es --output_name local_100_es
+
+# Compare ex_results.txt against the English baseline run (same 100 question_ids)
 ```
 
-**Concurrency Tuning:**
-- Set `--concurrency` based on your **GPT-4o TPM (tokens-per-minute) limit**
-- Start with 8-12 for testing
-- The bottleneck is API rate limits (not GPU) for REMOTE queries
-- Local SLM queries serialize on GPU but are fast for 1.5B models
-- Parallelism overlaps REMOTE API waits and SQL execution verification
+Translations are checkpointed to `data/bird_es/translations.jsonl` (`question_id`, `en`,
+`es`) for manual review. Note: retrieval (BGE-M3) and the SLM are multilingual, but query
+decomposition's stopwords are English-only — that degradation is part of what the ablation
+measures.
 
 **Checkpoint/Resume:**
 - If generation is interrupted, rerun the same command
@@ -317,9 +320,10 @@ aegis_sql/
 ├── config.py                    # Pydantic configuration models
 ├── config.yaml                  # Main configuration file
 ├── aegis_types.py               # Core type definitions
-├── query_planner/               # Query disambiguation & planning
-│   └── ambiguity_resolver.py   # Detect & resolve query ambiguities
-├── retriever/                   # Schema extraction (RAG)
+├── retriever/                   # RAG v2 schema linking
+│   ├── pipeline.py             # Multi-step retrieve → fuse → value-ground → budget
+│   ├── fusion.py               # RRF + recall-first adaptive table budget
+│   ├── value_index.py          # DB value grounding (LIKE probes)
 │   ├── schema_retriever.py
 │   └── embedding_models.py
 ├── router/                      # Content-independent routing
@@ -329,9 +333,12 @@ aegis_sql/
 │   ├── placeholder_vocab.py
 │   ├── reconstruction.py
 │   └── sensitivity_policy.py
-├── generator/                   # SQL generation
-│   ├── slm_generator.py        # Local FSLM (CodeLlama, DeepSeek)
-│   └── llm_fallback.py         # Remote FLLM (GPT-4, Claude)
+├── generator/                   # SQL generation, selection, repair
+│   ├── slm_generator.py        # Local FSLM (CscSQL-Merge-Qwen2.5-Coder-7B); execution-vote candidates
+│   ├── candidate_selector.py   # Execution-guided majority-vote selection
+│   ├── literal_repair.py       # Post-hoc near-miss literal → stored DB value
+│   ├── sql_postprocess.py      # CAST fix + reserved-word table quoting
+│   └── llm_fallback.py         # Remote FLLM (gpt-4.1-mini, Claude)
 ├── verifier/                    # Neuro-symbolic verification
 │   ├── grammar_verifier.py
 │   ├── schema_verifier.py
@@ -382,9 +389,11 @@ Based on: **"Three-Axis Constrained Optimization for Hybrid NL2SQL"**
 - ✅ Force local/remote override options
 
 **SQL Generation:**
-- ✅ Local SLM generator with HuggingFace models (tested with cycloneboy/SLM-SQL-1.5B)
+- ✅ Local SLM generator with HuggingFace models (default: cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct)
+- ✅ Execution-vote self-consistency (n=5, chunked/OOM-safe, seeded)
+- ✅ Deterministic post-processing: literal repair, reserved-word quoting, CAST fix
 - ✅ LoRA adapter support
-- ✅ Remote LLM fallback (OpenAI GPT-4o, Anthropic Claude)
+- ✅ Remote LLM fallback (OpenAI gpt-4.1-mini, Anthropic Claude)
 - ✅ SQL extraction and formatting
 
 **Privacy (DP Abstraction & Reconstruction):**

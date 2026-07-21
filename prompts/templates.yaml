@@ -76,6 +76,10 @@ slm:
     --    Example: CAST(`Free Meal Count (K-12)` AS REAL) / `Enrollment (K-12)` (NEVER plain integer division, which truncates to 0)
     -- 7. For subqueries: Use = for single value, IN for multiple values, HAVING for group filters
     -- 8. Return only valid SQLite syntax without explanations
+    -- 9. **PROJECT ONLY WHAT IS ASKED**: SELECT exactly the columns the question asks for — NEVER add
+    --    extra descriptive columns (no bonus IDs, names, dates, or the value you sorted/filtered by
+    --    unless the question explicitly asks for it)
+    --    Example: "List the IDs of patients ..." → SELECT ID (NOT SELECT ID, Birthday)
 
   # Question format template
   question_format: |

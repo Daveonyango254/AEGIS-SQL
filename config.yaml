@@ -6,10 +6,6 @@
 # ============================================================================
 language: english  # Supported: english, spanish, korean, chinese, swahili
 
-# Per-query pipeline: 'multi_agent' (the booster harness, default on aegis_feat)
-# or 'graph' (the original LangGraph pipeline, kept for A/B comparison).
-orchestrator: multi_agent
-
 # ============================================================================
 # Embedding Model Configuration (Query Planner Agent)
 # ============================================================================
@@ -40,10 +36,13 @@ slm:
   use_chat_template: true       # Apply tokenizer chat template (system+user) for instruct models
   full_schema: false            # Use top_k RAG retrieval (the stable baseline); true = inline the complete schema
   full_schema_max_columns: 160  # Fall back to top_k retrieval above this many total columns
-  num_candidates: 3             # Execution-guided self-consistency: local-SLM candidates per query (1 = single greedy)
+  num_candidates: 5             # Execution-guided self-consistency width (tunable ablation knob: 1 = single greedy; raised 3->5 — more executing candidates = better vote)
+  local_chunk_size: 2           # Max sampled sequences per model.generate call (memory safety; auto-halves on CUDA OOM, never silently drops candidates)
   selection_temperature: 0.8    # Sampling temperature for the non-greedy candidates
+  generation_seed: 42           # Seed torch/CUDA before sampling: reproducible runs (was null = ±3 EX noise); set null for stochastic sampling
   enable_value_grounding: true  # Inject sampled DB values / value-linking hints into the prompt
   enable_cast_fix: true         # Wrap division numerators in CAST(... AS REAL) (fixes integer-division ratio bugs)
+  enable_literal_repair: true   # Rewrite near-miss literals in the winning SQL to their unique stored DB form ('Brazil'->'Brasil', '2013-02-22 00:00:00'->'2013-02-22'); ambiguity = no change
   expose_keys: true             # Show real foreign keys (JOIN hints) + PRIMARY KEY markers in the DDL prompt
   retrieval_top_k: 80           # Schema columns retrieved before FK expansion (raised from 40)
   max_expanded_tables: 3        # Max FK-connected tables added to the anchors
@@ -53,7 +52,7 @@ slm:
 # ============================================================================
 llm:
   provider: openai  # openai or anthropic
-  model: gpt-4o  # gpt-4o, gpt-4-turbo, claude-3-5-sonnet-20241022, etc.
+  model: gpt-4.1-mini  # gpt-4.1-mini, gpt-4o, gpt-4-turbo, claude-3-5-sonnet-20241022, etc.
   api_key: ${OPENAI_API_KEY}  # Load from .env
   temperature: 0.0
   max_tokens: 512
@@ -63,7 +62,7 @@ llm:
 
 # ============================================================================
 # Privacy Configuration (DP Abstraction)
-# Hybrid mode (default). For the remote gpt-4o oracle run set epsilon=0 and
+# Hybrid mode (default). For the remote gpt-4.1-mini oracle run set epsilon=0 and
 # abstraction_enabled=false and reconstruction_enabled=false.
 # ============================================================================
 privacy:
@@ -83,7 +82,7 @@ privacy:
 # ============================================================================
 cost:
   budget_per_query: 0.01  # USD budget per query
-  remote_token_cost: 0.000015  # Cost per token for remote LLM (GPT-4o pricing)
+  remote_token_cost: 0.0000005  # Cost per token for remote LLM (gpt-4.1-mini blended ~$0.50/1M; was 0.000015 for gpt-4o)
   local_compute_cost: 0.0001  # Fixed cost per local SLM inference
 
 # ============================================================================
@@ -99,17 +98,6 @@ router:
     - query_structural_complexity
 
 # ============================================================================
-# Query Ambiguity Resolution (Optional Enhancement - DISABLED BY DEFAULT)
-# ============================================================================
-ambiguity:
-  enabled: false  # Set to true to enable ambiguity detection and resolution
-  detector_type: "rules"  # "rules" (fast, local, zero-cost) or "llm" (higher accuracy)
-  resolution_mode: "auto"  # "auto" (use defaults) or "interactive" (ask user)
-  auto_resolve_temporal: true  # Automatically resolve temporal ambiguities
-  temporal_default_days: 30  # Default interpretation for "recent" queries
-  confidence_threshold: 0.6  # Minimum confidence (0-1) to flag ambiguity
-
-# ============================================================================
 # Verifier Configuration (Neuro-Symbolic Verification)
 # ============================================================================
 verifier:
@@ -119,26 +107,28 @@ verifier:
   execution_check_llm: true  # Enable execution verification for LLM outputs
   sample_size: 100  # Number of rows for execution verification
   timeout_seconds: 30  # Execution timeout per query (raised 5->30 to stop clipping slow-but-correct SQL)
-  max_repair_attempts: 1  # Self-correction regenerations when verification fails (0 disables the repair loop)
+  max_repair_attempts: 2  # Self-correction regenerations when verification fails (raised 1->2: 13/100 queries ended with all-empty results and only one retry; 0 disables)
   repair_on_empty: true  # Treat an executed-but-empty result as a soft fail to trigger one value-aware repair
 
 # ============================================================================
-# Multi-Agent Booster Harness (orchestrator: multi_agent)
+# Multi-Step Retrieval (RAG v2)
 # ============================================================================
-# A booster, not a bottleneck: diverse multi-strategy candidates + execution-guided
-# selection + a local-model judge + bounded execution-feedback refinement. Every
-# lever is a flag so the cost<->accuracy frontier can be A/B-tested.
-agents:
-  # Model-aware strategies: the local SLM is a specialist (direct self-consistency);
-  # the remote LLM is a general reasoner (add query-plan chain-of-thought).
-  local_strategies: [direct]                 # specialist SLM => direct self-consistency
-  remote_strategies: [direct, query_plan]    # general LLM => + CoT (add 'divide_and_conquer' for nested queries)
-  candidates_per_strategy: 2         # 1 greedy + (n-1) sampled, per strategy
-  generation_temperature: 0.7        # diversity for the sampled candidates
-  refine_rounds: 1                   # bounded execution-feedback repair on the winner (0 disables)
-  judge_enabled: true                # local-model tie-break on split execution votes
-  max_judge_candidates: 4            # cap candidates shown to the judge
-  selection_timeout: 30              # per-candidate execution timeout (s) during select/refine
+# Decompose -> per-sub-query hybrid search -> RRF fusion + table cards ->
+# value retrieval (ground literals in the DB) -> FK-aware adaptive budget ->
+# coverage-driven recursive round -> optional ColBERT re-rank.
+# Targets the measured failure modes: 7.5 tables retrieved for 1.76 needed on
+# simple queries (noise), 247/1534 wrong table sets (join mazes), literal errors.
+rag:
+  multi_step: true          # false = legacy single-shot top-k + FK closure (A/B control)
+  per_query_top_k: 40       # columns per sub-query before fusion
+  max_sub_queries: 6        # decomposition cap (bounds retrieval cost)
+  max_rounds: 2             # round 2 relaxes matching for uncovered entities
+  max_tables: 6             # evidence-table budget (raised 4->6 for FK-maze recall; value-hit + question-named tables bypass the cap, FK bridges may exceed)
+  per_table_columns: 10     # per-table column budget (keys + value hits always kept)
+  value_retrieval: true     # locate question literals in the DB (exact stored forms)
+  max_value_probes: 200     # LIKE-probe budget per query
+  table_cards: true         # table-summary chunk evidence during fusion
+  rerank: true              # ColBERT re-rank of the final slice (same BGE-M3 model)
 
 # ============================================================================
 # Evaluation Configuration
@@ -165,51 +155,3 @@ logging:
   track_privacy: true
   track_verification: true
   track_latency: true
-
-# ============================================================================
-# Configuration Presets (uncomment to use)
-# ============================================================================
-
-# --- LOCAL-ONLY MODE ---
-# Forces all queries to local FSLM (zero privacy leakage, no API costs)
-# router:
-#   force_local: true
-# OR set budget to 0:
-# cost:
-#   budget_per_query: 0.0
-
-# --- REMOTE-ONLY MODE ---
-# Forces all queries to remote FLLM (maximum accuracy, higher cost)
-# router:
-#   force_remote: true
-# OR set threshold to 0:
-# router:
-#   threshold_complexity: 0.0
-
-# --- NO ABSTRACTION MODE ---
-# Disables DP abstraction (WARNING: sensitive data sent to remote LLM!)
-# privacy:
-#   abstraction_enabled: false
-#   reconstruction_enabled: false
-# OR set epsilon to 0:
-# privacy:
-#   epsilon: 0.0
-
-# --- HYBRID MODE (DEFAULT) ---
-# Automatic routing based on complexity and cost
-# Abstraction enabled for remote queries
-# (Current configuration above)
-
-# ============================================================================
-# BOOSTER CLEAN-ABLATION MATRIX (measure harness+model vs model-alone)
-# The default hybrid run mixes the DP-abstraction penalty into 81% of queries, so
-# it is NOT a clean booster test. Run these four cells (same --num_queries 100
-# --seed 42 --stratify) and compare booster vs its single-shot control:
-#
-#  A. LOCAL booster   : orchestrator=multi_agent, router.force_local=true
-#  A'. LOCAL control  : orchestrator=graph,       router.force_local=true
-#  B. REMOTE booster  : orchestrator=multi_agent, router.force_remote=true,
-#                       privacy.epsilon=0, abstraction_enabled=false, reconstruction_enabled=false
-#  B'. REMOTE control : same as B but orchestrator=graph   (== the 47% gpt-4o baseline)
-#
-# Success = booster EX > control in each cell. Ablate agents.* to map cost<->accuracy.

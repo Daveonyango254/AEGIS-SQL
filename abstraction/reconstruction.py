@@ -80,9 +80,21 @@ class ReconstructionModule:
         )
 
         for placeholder, real_token in sorted_items:
-            if placeholder in reconstructed_text:
-                reconstructed_text = reconstructed_text.replace(placeholder, real_token)
-                num_replaced += 1
+            if placeholder not in reconstructed_text:
+                continue
+            while placeholder in reconstructed_text:
+                idx = reconstructed_text.index(placeholder)
+                token = real_token
+                # SQL-literal awareness: when the model wrapped the placeholder in
+                # single quotes (WHERE name = '<PERSON_1>'), a real token containing
+                # an apostrophe (Atoian's) must be escaped as '' or the statement
+                # breaks at the grammar stage (the q54/q1205 failure class).
+                before = reconstructed_text[:idx]
+                after = reconstructed_text[idx + len(placeholder):]
+                if before.endswith("'") and after.startswith("'") and "'" in token:
+                    token = token.replace("'", "''")
+                reconstructed_text = before + token + after
+            num_replaced += 1
 
         logger.debug(f"Reconstructed {num_replaced} placeholders")
 

@@ -60,12 +60,26 @@ class SLMConfig(BaseModel):
         description="Max total columns to inline as full schema before falling back to RAG retrieval",
     )
     num_candidates: int = Field(
-        default=3,
-        description="Number of candidates for execution-guided self-consistency (1 = single greedy decode)",
+        default=5,
+        description="Execution-guided self-consistency width: 1 greedy + (n-1) temperature "
+        "samples, execution-vote selected. Tunable ablation knob (1 = single greedy decode); "
+        "model-agnostic — plain HF sampling, works for any causal LM in slm.model.",
+    )
+    local_chunk_size: int = Field(
+        default=2,
+        description="Max sampled sequences decoded per model.generate call. Bounds decode "
+        "memory so higher num_candidates cannot OOM a small GPU; on CUDA OOM the chunk "
+        "auto-halves (floor 1) and retries instead of silently dropping candidates.",
     )
     selection_temperature: float = Field(
         default=0.8,
         description="Sampling temperature used for the non-greedy candidates",
+    )
+    generation_seed: Optional[int] = Field(
+        default=None,
+        description="Seed torch/CUDA before sampling so the temperature candidates "
+        "(and therefore EX) are reproducible run-to-run. None = unseeded (current "
+        "behavior); set an int (e.g. 42) to remove sampling noise between runs.",
     )
     enable_value_grounding: bool = Field(
         default=True,
@@ -74,6 +88,12 @@ class SLMConfig(BaseModel):
     enable_cast_fix: bool = Field(
         default=True,
         description="Wrap division numerators in CAST(... AS REAL) to fix integer-division ratio bugs",
+    )
+    enable_literal_repair: bool = Field(
+        default=True,
+        description="Post-hoc literal repair: rewrite near-miss string literals in the "
+        "selected SQL (case/diacritic/datetime-suffix one-offs) to their unique stored "
+        "DB value. Deterministic and conservative (ambiguity = no change).",
     )
     expose_keys: bool = Field(
         default=True,
@@ -94,7 +114,7 @@ class LLMConfig(BaseModel):
     """Large language model configuration for remote fallback (FLLM)."""
 
     provider: str = Field(default="openai", description="LLM provider (openai/anthropic)")
-    model: str = Field(default="gpt-4o", description="LLM model name")
+    model: str = Field(default="gpt-4.1-mini", description="LLM model name")
     api_key: str = Field(default="${OPENAI_API_KEY}", description="API key from environment")
     temperature: float = Field(default=0.0, description="Sampling temperature")
     max_tokens: int = Field(default=512, description="Maximum tokens to generate")
@@ -162,7 +182,7 @@ class CostConfig(BaseModel):
 
     budget_per_query: float = Field(default=0.01, description="USD budget per query")
     remote_token_cost: float = Field(
-        default=0.000015, description="Cost per token for remote LLM"
+        default=0.0000005, description="Cost per token for remote LLM (gpt-4.1-mini blended ~$0.50/1M)"
     )
     local_compute_cost: float = Field(
         default=0.0001, description="Fixed cost per local SLM inference"
@@ -231,57 +251,47 @@ class VerifierConfig(BaseModel):
     )
 
 
-class AgentsConfig(BaseModel):
-    """Multi-agent booster harness configuration.
+class RagConfig(BaseModel):
+    """Multi-step retrieval (RAG v2) configuration.
 
-    Every lever is a flag so the cost<->accuracy frontier is directly A/B-able.
-    Defaults are the "moderate" booster: two complementary strategies, two
-    candidates each, execution-guided selection, and one execution-feedback
-    refine round.
+    The pipeline decomposes the question, retrieves per sub-query, fuses the
+    rankings (RRF), grounds literals against the database (value retrieval),
+    applies an FK-aware adaptive schema budget, and optionally re-ranks with
+    ColBERT. Every stage is a flag so the retrieval design is ablatable.
     """
 
-    # Strategies are model-aware: the local SLM is a SQL specialist (CscSQL/
-    # CSC-SQL) trained for direct generation, so it gets execution-guided
-    # self-consistency over `direct`; chain-of-thought tends to hurt it and adds
-    # latency. The remote LLM is a general reasoner, so it gets the CoT strategies.
-    local_strategies: List[str] = Field(
-        default=["direct"],
-        description="Strategies on the LOCAL SLM path (specialist => direct self-consistency)",
+    multi_step: bool = Field(
+        default=True, description="Use the multi-step pipeline (False = legacy single-shot top-k)"
     )
-    remote_strategies: List[str] = Field(
-        default=["direct", "query_plan"],
-        description="Strategies on the REMOTE LLM path (general reasoner => add CoT). "
-        "Any of 'direct', 'query_plan', 'divide_and_conquer'",
+    per_query_top_k: int = Field(
+        default=40, description="Columns retrieved per sub-query before fusion"
     )
-    candidates_per_strategy: int = Field(
-        default=2, description="Candidates sampled per strategy (1 greedy + rest sampled)"
+    max_sub_queries: int = Field(
+        default=6, description="Cap on decomposed sub-queries (bounds retrieval cost)"
     )
-    generation_temperature: float = Field(
-        default=0.7, description="Sampling temperature for the non-greedy candidates"
+    max_rounds: int = Field(
+        default=2, description="Retrieval rounds; round 2 relaxes matching for uncovered entities"
     )
-    refine_rounds: int = Field(
-        default=1, description="Bounded execution-feedback repair rounds on the winner (0 disables)"
+    max_tables: int = Field(
+        default=6,
+        description="Evidence-table budget (raised 4->6 to protect FK-maze recall; "
+        "value-hit and question-named tables bypass this cap, FK bridges may exceed it)",
     )
-    judge_enabled: bool = Field(
-        default=True, description="Use the local model to break split execution votes (CHASE-SQL selector)"
+    per_table_columns: int = Field(
+        default=10, description="Column budget per kept table (keys + value hits always kept)"
     )
-    max_judge_candidates: int = Field(
-        default=4, description="Cap on candidates shown to the selection judge"
+    value_retrieval: bool = Field(
+        default=True, description="Probe the DB to locate question literals in columns"
     )
-    selection_timeout: int = Field(
-        default=30, description="Per-candidate execution timeout (seconds) during selection/refine"
+    max_value_probes: int = Field(
+        default=200, description="LIKE-probe budget per query (cost bound)"
     )
-
-    @field_validator("local_strategies", "remote_strategies")
-    @classmethod
-    def validate_strategies(cls, v: List[str]) -> List[str]:
-        allowed = {"direct", "query_plan", "divide_and_conquer"}
-        bad = [s for s in v if s not in allowed]
-        if bad:
-            raise ValueError(f"Unknown strategies {bad}; allowed: {sorted(allowed)}")
-        if not v:
-            raise ValueError("At least one generation strategy is required")
-        return v
+    table_cards: bool = Field(
+        default=True, description="Use table-summary card evidence during fusion"
+    )
+    rerank: bool = Field(
+        default=True, description="ColBERT re-rank of the final slice (same BGE-M3 model)"
+    )
 
 
 class EvaluationConfig(BaseModel):
@@ -294,52 +304,6 @@ class EvaluationConfig(BaseModel):
         default=["execution_accuracy", "ves", "privacy_loss", "cost_per_query", "latency"],
         description="Metrics to compute",
     )
-
-
-class AmbiguityConfig(BaseModel):
-    """Query ambiguity resolution configuration.
-
-    Detects and resolves ambiguous queries before SQL generation.
-
-    Attributes:
-        enabled: Enable ambiguity detection and resolution (default: False)
-        detector_type: Detection method - "rules" (fast, local) or "llm" (accurate)
-        resolution_mode: Resolution strategy - "auto" (use defaults) or "interactive" (ask user)
-        auto_resolve_temporal: Automatically resolve temporal ambiguities
-        temporal_default_days: Default days for "recent" queries (default: 30)
-        confidence_threshold: Minimum confidence to flag ambiguity (0-1)
-    """
-
-    enabled: bool = Field(default=False, description="Enable ambiguity detection (disabled by default)")
-    detector_type: str = Field(default="rules", description="Detection method: 'rules' or 'llm'")
-    resolution_mode: str = Field(default="auto", description="Resolution mode: 'auto' or 'interactive'")
-    auto_resolve_temporal: bool = Field(default=True, description="Auto-resolve temporal ambiguities")
-    temporal_default_days: int = Field(default=30, description="Default days for 'recent' queries")
-    confidence_threshold: float = Field(default=0.6, description="Min confidence to flag ambiguity (0-1)")
-
-    @field_validator("detector_type")
-    @classmethod
-    def validate_detector_type(cls, v: str) -> str:
-        """Validate detector type is valid."""
-        if v not in ["rules", "llm"]:
-            raise ValueError("detector_type must be 'rules' or 'llm'")
-        return v
-
-    @field_validator("resolution_mode")
-    @classmethod
-    def validate_resolution_mode(cls, v: str) -> str:
-        """Validate resolution mode is valid."""
-        if v not in ["auto", "interactive"]:
-            raise ValueError("resolution_mode must be 'auto' or 'interactive'")
-        return v
-
-    @field_validator("confidence_threshold")
-    @classmethod
-    def validate_confidence_threshold(cls, v: float) -> float:
-        """Validate confidence threshold is in valid range."""
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_threshold must be between 0.0 and 1.0")
-        return v
 
 
 class LoggingConfig(BaseModel):
@@ -378,19 +342,14 @@ class AEGISConfig(BaseSettings):
     """
 
     language: Language = Field(default=Language.ENGLISH, description="Query language")
-    orchestrator: str = Field(
-        default="graph",
-        description="Per-query pipeline: 'graph' (LangGraph) or 'multi_agent' (booster)",
-    )
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     slm: SLMConfig = Field(default_factory=SLMConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     cost: CostConfig = Field(default_factory=CostConfig)
     router: RouterConfig = Field(default_factory=RouterConfig)
-    ambiguity: AmbiguityConfig = Field(default_factory=AmbiguityConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
-    agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    rag: RagConfig = Field(default_factory=RagConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

@@ -26,9 +26,10 @@ _DEFAULT_SLM_SYSTEM_PROMPT = (
     "You are an expert text-to-SQL generator for the SQLite/BIRD benchmark. "
     "Given a database schema and a question, output a single valid SQLite query. "
     "Use the exact column names and literal values shown in the schema "
-    "(prefer values listed under 'examples:'). For ratios or averages of "
-    "integer columns, cast the numerator with CAST(... AS REAL) to avoid "
-    "integer division. Return only the SQL query."
+    "(prefer values listed under 'examples:'). SELECT exactly the columns the "
+    "question asks for — never add extra descriptive columns. For ratios or "
+    "averages of integer columns, cast the numerator with CAST(... AS REAL) to "
+    "avoid integer division. Return only the SQL query."
 )
 
 
@@ -216,12 +217,12 @@ class SLMGenerator:
                     temperature=0.0, num_return_sequences=1,
                 )
             )
-            # Candidates 2..n: temperature samples (batched in one call).
+            # Candidates 2..n: temperature samples (memory-bounded chunks).
             if n > 1 and temperature > 0:
                 texts.extend(
-                    self._run_generation(
-                        inputs, max_tokens=max_tokens, do_sample=True,
-                        temperature=temperature, num_return_sequences=n - 1,
+                    self._sample_chunked(
+                        inputs, max_tokens=max_tokens,
+                        temperature=temperature, n_samples=n - 1,
                     )
                 )
 
@@ -241,49 +242,6 @@ class SLMGenerator:
             logger.error(f"SLM candidate generation failed: {e}")
             logger.warning("Falling back to stub mode")
             return [self._generate_stub(schema_elements)]
-
-    def complete(
-        self,
-        prompt: str,
-        n: int = 1,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        system_prompt: Optional[str] = None,
-    ) -> List[str]:
-        """Model-agnostic completion from a prebuilt prompt (booster interface).
-
-        Returns up to ``n`` finalized SQL strings: one greedy decode plus
-        ``n-1`` temperature samples. Used by the multi-agent generator to drive
-        arbitrary reasoning strategies through the same model plumbing as
-        ``generate_candidates``. Returns ``[]`` if the model is unavailable so the
-        caller can fall back to other strategies.
-        """
-        max_tokens = max_tokens or self.config.max_tokens
-        temperature = (
-            temperature if temperature is not None
-            else getattr(self.config, "selection_temperature", 0.8)
-        )
-        if self.model is None or self.tokenizer is None:
-            logger.warning("SLM not loaded; complete() returns no candidates")
-            return []
-
-        try:
-            inputs = self._build_inputs(
-                None, None, user_content=prompt, system_prompt=system_prompt
-            )
-            texts = self._run_generation(
-                inputs, max_tokens=max_tokens, do_sample=False,
-                temperature=0.0, num_return_sequences=1,
-            )
-            if n > 1 and temperature > 0:
-                texts.extend(self._run_generation(
-                    inputs, max_tokens=max_tokens, do_sample=True,
-                    temperature=temperature, num_return_sequences=n - 1,
-                ))
-            return [s for s in (self._finalize(t) for t in texts) if s]
-        except Exception as e:
-            logger.error(f"SLM complete() failed: {e}")
-            return []
 
     def _build_inputs(
         self,
@@ -348,6 +306,57 @@ class SLMGenerator:
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         return inputs
 
+    def _sample_chunked(self, inputs, max_tokens: int, temperature: float,
+                        n_samples: int) -> List[str]:
+        """Decode ``n_samples`` temperature samples in memory-bounded chunks.
+
+        Decoding all samples in one ``model.generate`` batch OOMs small GPUs at
+        higher ``num_candidates`` — and an OOM here used to silently collapse the
+        whole candidate pool into a stub (the 3%-EX disaster mode). Instead:
+
+        * at most ``config.local_chunk_size`` sequences per call (identical
+          sampling params, so outputs are statistically unchanged);
+        * a DISTINCT seed per chunk (``generation_seed + produced``) so seeded
+          runs stay reproducible without chunks duplicating each other;
+        * on CUDA OOM: empty the cache, halve the chunk (floor 1) and retry —
+          LOUDLY; if even a single sequence cannot decode, return what we have
+          (the greedy candidate still competes) rather than raising into stub.
+
+        Model-agnostic: plain HF generate over whatever ``slm.model`` is loaded.
+        """
+        texts: List[str] = []
+        chunk = max(1, int(getattr(self.config, "local_chunk_size", 2)))
+        base_seed = getattr(self.config, "generation_seed", None)
+        produced = 0
+        while produced < n_samples:
+            size = min(chunk, n_samples - produced)
+            seed = (base_seed + produced) if base_seed is not None else None
+            try:
+                texts.extend(
+                    self._run_generation(
+                        inputs, max_tokens=max_tokens, do_sample=True,
+                        temperature=temperature, num_return_sequences=size,
+                        seed=seed,
+                    )
+                )
+                produced += size
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if size == 1:
+                    logger.error(
+                        "CUDA OOM decoding even a SINGLE sampled sequence — "
+                        f"returning {produced}/{n_samples} samples. Free GPU "
+                        "memory (check for stale processes with nvidia-smi) or "
+                        "lower slm.max_tokens / num_candidates."
+                    )
+                    break
+                chunk = max(1, size // 2)
+                logger.warning(
+                    f"CUDA OOM at chunk={size}; halving to {chunk} and retrying "
+                    "(candidates are preserved, not dropped)"
+                )
+        return texts
+
     def _run_generation(
         self,
         inputs,
@@ -355,8 +364,14 @@ class SLMGenerator:
         do_sample: bool,
         temperature: float,
         num_return_sequences: int = 1,
+        seed: Optional[int] = None,
     ) -> List[str]:
-        """Run model.generate and decode only the newly generated tokens."""
+        """Run model.generate and decode only the newly generated tokens.
+
+        ``seed`` (sampling only) makes the call reproducible; chunked sampling
+        passes a distinct seed per chunk so chunks don't duplicate each other.
+        Falls back to ``config.generation_seed`` when not given.
+        """
         gen_kwargs = dict(
             max_new_tokens=max_tokens,
             do_sample=do_sample,
@@ -366,6 +381,14 @@ class SLMGenerator:
         if do_sample:
             gen_kwargs["temperature"] = temperature
             gen_kwargs["top_p"] = 0.95
+            # Optional reproducibility: seed the RNG before sampling so the
+            # temperature candidates (and thus EX) are stable run-to-run.
+            if seed is None:
+                seed = getattr(self.config, "generation_seed", None)
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
 
         with torch.no_grad():
             outputs = self.model.generate(**inputs, **gen_kwargs)
@@ -446,92 +469,19 @@ class SLMGenerator:
         )
 
     def _extract_sql_from_output(self, output: str, prompt: str) -> str:
-        """Extract SQL from model output.
+        """Extract SQL from model output via the shared extractor.
 
-        The model generates SQL first, then may add explanations. We extract just the SQL.
+        Delegates to :func:`generator.sql_postprocess.extract_sql` so the SLM and
+        LLM paths handle fenced blocks, reasoning-then-SQL, and truncated fences
+        identically.
 
         Args:
             output: Raw model output
-            prompt: Original prompt (not used since we already stripped it)
-
-        Returns:
-            Extracted SQL query string
+            prompt: Original prompt (unused; new tokens are already isolated)
         """
-        sql = output.strip()
+        from generator.sql_postprocess import extract_sql
 
-        # Strip any surrounding markdown code fences (leading ```sql/``` and
-        # everything after a closing ```), otherwise a trailing fence leaks into
-        # the SQL and fails grammar verification.
-        if sql.startswith("```sql"):
-            sql = sql[6:]
-        elif sql.startswith("```"):
-            sql = sql[3:]
-        if "```" in sql:
-            sql = sql.split("```", 1)[0]
-        sql = sql.strip()
-
-        # Priority 1: Extract from ```sql ... ``` code blocks
-        if "```sql" in sql:
-            start = sql.find("```sql") + 6
-            end = sql.find("```", start)
-            if end != -1:
-                result = sql[start:end].strip()
-                logger.debug(f"Extracted from ```sql block")
-                return result
-
-        # Priority 2: SQL is at the beginning, stop at question markers
-        # The model outputs: "SELECT ... ; \nWhat is the SQL query..."
-        # We want just the "SELECT ... ;"
-        if sql.upper().startswith("SELECT"):
-            # Find the first semicolon
-            if ";" in sql:
-                # Take everything up to the first semicolon
-                sql_part = sql.split(";")[0].strip() + ";"
-
-                # Additional cleanup: stop at newline followed by "What is" or "Instructions"
-                lines = sql_part.split("\n")
-                result_lines = []
-                for line in lines:
-                    stripped = line.strip()
-                    # Stop at explanation/question markers
-                    if stripped.startswith(("What is", "Instructions:", "Note:", "Explanation:")):
-                        break
-                    if stripped:
-                        result_lines.append(stripped)
-
-                result = " ".join(result_lines)
-                # Ensure ends with semicolon
-                if not result.endswith(";"):
-                    if ";" in result:
-                        result = result.split(";")[0].strip() + ";"
-
-                logger.debug(f"Extracted SQL from beginning")
-                return result
-
-        # Priority 3: Search for SQL statement in the output
-        lines = sql.split("\n")
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "WITH")):
-                # Found SQL start, collect until semicolon
-                sql_lines = [stripped]
-                j = i + 1
-                while j < len(lines):
-                    next_line = lines[j].strip()
-                    # Stop at explanations
-                    if next_line.startswith(("What is", "Instructions:", "Note:", "Explanation:")):
-                        break
-                    if next_line:
-                        sql_lines.append(next_line)
-                    if ";" in next_line:
-                        break
-                    j += 1
-
-                result = " ".join(sql_lines)
-                if ";" in result:
-                    result = result.split(";")[0].strip() + ";"
-                logger.debug(f"Extracted SQL from line search")
-                return result
-
-        logger.warning(f"Could not extract SQL from output")
-        return ""
+        sql = extract_sql(output)
+        if not sql:
+            logger.warning("Could not extract SQL from output")
+        return sql
