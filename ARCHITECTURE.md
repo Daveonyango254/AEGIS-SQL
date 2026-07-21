@@ -165,7 +165,7 @@ Knobs live under `config.rag` (`max_tables`, `per_table_columns`, `per_query_top
 ### 4.2 `generator/` — candidate generation, selection, and repair
 | Module | Responsibility |
 |---|---|
-| `slm_generator.py` | Local generation. `generate_candidates()` / `complete()` = greedy + chunked temperature samples (`_sample_chunked`, OOM-safe, seeded); `_finalize` → `finalize_sql`. Native OmniSQL-style DDL prompt with FK/PK exposure + value hints. |
+| `slm_generator.py` | Local generation. `generate_candidates()` = greedy + chunked temperature samples (`_sample_chunked`, OOM-safe, seeded); `_finalize` → `finalize_sql`. Native DDL prompt with FK/PK exposure + value hints. |
 | `candidate_selector.py` | **`select_best`** — execution-guided majority vote (§2.2); `flag_empty_for_repair` decides when an all-empty result triggers a value-aware retry. |
 | `literal_repair.py` | **`repair_literals`** — post-selection near-miss literal → stored-DB-value rewrite (§2.3). |
 | `sql_postprocess.py` | `apply_cast_fix` (real division) + `quote_reserved_tables` (reserved-word table quoting) + `finalize_sql`. |
@@ -176,7 +176,7 @@ Knobs live under `config.rag` (`max_tables`, `per_table_columns`, `per_query_top
 |---|---|
 | `schema_render.py` | `render_schema_ddl` — the single CREATE-TABLE + FK/PK + value-hint renderer. |
 | `prompt_manager.py` + `templates.yaml` | Loads the SLM system prompt, few-shot examples, and the tuned **instruction list** (evidence-first, exact FK/PK, exact literals, **project only asked-for columns**, real division). |
-| `sql_strategies.py` | Reasoning-strategy prompt builders (direct / query-plan / decompose) + judge prompt — retained as reusable prompt helpers (`slm_generator` uses `build_direct_prompt`). |
+| `sql_strategies.py` | Reasoning-strategy prompt builders (direct / query-plan / decompose); `slm_generator` uses `build_direct_prompt`. |
 
 ### 4.4 `verifier/` — 3-stage neuro-symbolic verification (the "Reviewer")
 `review.py :: run_verification` runs, short-circuiting on the first failure:
@@ -238,6 +238,15 @@ combined EX/VES/three-axis report.
 **Common run modes:** local-only = `router.force_local: true`; remote oracle = `force_remote: true`
 + `privacy.epsilon: 0` + `abstraction_enabled: false`. `generation_seed: 42` makes local runs
 reproducible so config changes are measurable.
+
+**Language ablation.** `config.language` is inert at runtime; language ablations are run via
+**parallel data dirs**, not config: `scripts/make_spanish_sample.py` builds `data/bird_es/`
+(the same seed-42 stratified 100-query sample with questions machine-translated to Spanish,
+entities/literals preserved verbatim; gold SQL, evidence, and databases unchanged via symlink),
+and the whole ablation is then `--bird_path data/bird_es` on the *unchanged* pipeline. Retrieval
+(BGE-M3) and the SLM are multilingual; `query_decompose`'s stopwords/regexes are English-only, so
+decomposition is weaker on non-English questions — a documented limitation the ablation measures
+rather than patches.
 
 ---
 
