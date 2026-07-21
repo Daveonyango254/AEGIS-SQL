@@ -532,12 +532,10 @@ prompts/           ← schema_render, sql_strategies, prompt_manager, templates.
 verifier/          ← grammar / schema / execution verifiers, feedback_generator, review
 workflow/          ← model_cache, embedding_cache, costing  (+ graph, state — legacy pipeline)
 abstraction/       ← PARKED privacy layer (DP abstraction, reconstruction, vocab, policy)
-router/            ← PARKED content-independent router
-query_planner/     ← PARKED ambiguity resolver
+router/            ← content-independent router (privacy thesis; used on the remote path)
 evaluation/        ← BIRD loader, EX/VES evaluators, sampling, retrieval analyzer, metrics
 config.py / config.yaml   ← Pydantic config + the active config
 run_bird_evaluation.py    ← the canonical eval driver
-Model_Fine_Tuning/ ← standalone offline SLM fine-tuning pipeline (not imported at runtime)
 tests/             ← offline unit tests (mock models / in-memory sqlite)
 ```
 

@@ -44,12 +44,13 @@ These were candidates in an aggressive audit but are retained on purpose:
   load `graph.py`. Deleting them requires editing `__init__.py` + `run_bird_evaluation.py`'s
   top-level import in the same change. Left intact to avoid breaking the active path; remove only
   as a deliberate "drop the graph A/B" change.
-- **`Model_Fine_Tuning/`** — a self-contained offline SLM fine-tuning pipeline that imports
-  nothing from the runtime (dependency is one-directional). Left whole rather than partially
-  gutted. If the paper does not use a locally fine-tuned checkpoint, delete the entire directory
-  in one move — do not remove individual files (that leaves it broken).
 - **`scripts/install_embedding_model.py`** — one-off BGE-M3 setup helper; harmless, useful on a
   fresh pod.
+
+**`Model_Fine_Tuning/` — REMOVED.** The self-contained offline SLM fine-tuning pipeline (imported
+by nothing at runtime; dependency was one-directional) was deleted wholesale: the fine-tuning is
+maintained in a separate repo, so the copy here was dead weight. Nothing on the graph/eval path
+referenced it.
 
 ## Verification
 
